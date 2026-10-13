@@ -10,7 +10,8 @@
     "test": "bun test",
     "test:e2e": "bun test/e2e/smoke.ts",
     "test:e2e:word": "bun test/e2e/word.ts",
-    "test:e2e:live": "bun test/e2e/live.ts"
+    "test:e2e:live": "bun test/e2e/live.ts",
+    "test:e2e:sw": "bun test/e2e/sw.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

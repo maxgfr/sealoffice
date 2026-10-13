@@ -108,4 +108,24 @@ describe('tab guard', () => {
     expect(yielded).toBe(false);
     expect(other.active).toBe(true);
   });
+
+  test('a tab that lets go frees the lock and no longer answers takeovers', async () => {
+    const locks = new FakeLocks();
+    const hub = new FakeHub();
+    let yielded = false;
+    const done = new TabGuard(locks, hub.channel());
+    done.setYieldHandler(async () => {
+      yielded = true;
+    });
+    expect(await done.acquire()).toBe(true);
+    done.letGo();
+    expect(done.active).toBe(false);
+    // Web Locks hand a released lock over asynchronously.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const home = new TabGuard(locks, hub.channel());
+    expect(await home.acquire()).toBe(true);
+    await new TabGuard(locks, hub.channel()).takeOver().catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(yielded).toBe(false);
+  });
 });

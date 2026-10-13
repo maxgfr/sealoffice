@@ -10,6 +10,16 @@ export interface BuildInfo {
   sha256: Record<string, string>;
 }
 
+/**
+ * The service worker's URL: the version, and the build (`b`), which changes with every deploy,
+ * so each deploy installs its own worker and cache.
+ */
+export function swUrl(info: Pick<BuildInfo, 'version' | 'commit'>): string {
+  const params = new URLSearchParams({ v: info.version });
+  if (/^[0-9a-f]{7,}$/.test(info.commit)) params.set('b', info.commit.slice(0, 12));
+  return `./sw.js?${params}`;
+}
+
 const UPSTREAM = 'https://github.com/ibisjp/ibis-office';
 const SOURCE = 'https://github.com/maxgfr/sealoffice';
 

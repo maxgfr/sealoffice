@@ -3,8 +3,9 @@
 // the library (unlocking it only when it is protected) and stores every
 // snapshot; guests need no library (memory only) and may save a copy into theirs.
 import { Autosaver, SaveSignal } from '../autosave';
+import { setSaveBeforeLock } from '../lock';
 import type { SealCrypto } from '../crypto';
-import { assetBase, loadEditor, type EditorModule } from '../editor';
+import { assetBase, editorSaveHandler, loadEditor, type EditorModule } from '../editor';
 import { alert, button, confirm, errorMessage, form, h } from '../ui';
 import type { Vault } from '../vault';
 import { importSessionKey } from './protocol';
@@ -15,6 +16,8 @@ import { joinTrystero } from './transport';
 const LIVE_AUTOSAVE_MS = 3000;
 /** Typing takes the pen from a holder that has not typed for this long. */
 const AUTO_PEN_IDLE_MS = 5000;
+/** How long a guest waits for the host's document before hearing it may not come. */
+const GUEST_WAIT_MS = 20_000;
 /** Typing while someone else holds the pen asks for it at most this often. */
 const AUTO_PEN_RETRY_MS = 1500;
 /** sessionStorage: the host's document of room `<room>`, once the address bar shows the invite link. */
@@ -23,7 +26,7 @@ const HOST_DOC_KEY = 'sealoffice-live-host:';
 export interface LiveDeps {
   graphics: boolean;
   /** Tab guard, then the lock screen in `root` if the library is protected; resolves once it is open. */
-  openVault(root: HTMLElement): Promise<{ vault: Vault; seal: SealCrypto }>;
+  openVault(root: HTMLElement): Promise<{ vault: Vault; seal: SealCrypto; release(): Promise<void> }>;
 }
 
 interface LiveLink {
@@ -157,7 +160,7 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
   bar.showPen(session.holdsPen, 'The host');
 
   // Saves: the pen holder's go to every peer (and the host's library); nobody else saves.
-  window.ibisOfficeSaveFile = async (name, bytes) => {
+  window.ibisOfficeSaveFile = editorSaveHandler(async (name, bytes) => {
     try {
       if (!session.holdsPen) throw new Error('only the participant holding the pen can save');
       if (host) await host.vault.write(host.name, bytes, host.id);
@@ -168,7 +171,7 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
       signal.emit({ error });
       throw error;
     }
-  };
+  });
   window.ibisOfficePickFile = async () => {
     await alert('Not in a live session', 'Leave the session to open another document.');
     return null;
@@ -197,15 +200,28 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
     session.leave().then(() => location.assign(new URL('./', location.href).href), bar.reportError);
   };
 
-  if (!host) root.replaceChildren(h('main', { class: 'card lock' }, h('p', { class: 'muted' }, 'Waiting for the host’s document…')));
+  let slow = 0;
+  if (!host) {
+    const waiting = h('main', { class: 'card lock' }, h('p', { class: 'muted' }, 'Waiting for the host’s document…'));
+    root.replaceChildren(waiting);
+    // Peers reach each other directly: some networks (office, public Wi-Fi) do not let them.
+    slow = window.setTimeout(() => waiting.append(h('p', { class: 'muted small' },
+      'Still waiting. The host may have left the session, or one of your networks blocks direct connections ' +
+      'between browsers. Ask the host to check the session is still open, or try another network.')), GUEST_WAIT_MS);
+  }
   const [first, loaded] = await Promise.all([firstSnapshot, editorLoad]);
+  clearTimeout(slow);
   editor = loaded;
   root.replaceChildren();
   // No app bar here: the canvas takes the whole window, the session bar floats over it.
   document.documentElement.style.setProperty('--appbar', '0px');
-  editor.run(assetBase(), first.name, first.bytes);
+  // Snapshots that came while the editor downloaded: start from the newest.
+  const start = session.latest ?? first;
+  editor.run(assetBase(), start.name, start.bytes);
   session.attachEditor(editor);
   autosaver = new Autosaver(editor, signal);
+  // A lock (auto lock, or the library taken by another tab) reloads the page: the pen holder's edits go out first.
+  setSaveBeforeLock(async () => (session.holdsPen && autosaver ? autosaver.flush() : 'clean'));
   if (session.holdsPen) autosaver.start(bar.reportError, LIVE_AUTOSAVE_MS);
   shield.hidden = session.holdsPen;
   document.body.append(shield, bar.el);
@@ -230,9 +246,14 @@ async function saveCopy(snapshot: Snapshot | null, deps: LiveDeps): Promise<void
   overlay.append(panel);
   document.body.append(overlay);
   try {
-    const { vault } = await deps.openVault(panel);
-    const entry = await vault.write(vault.uniqueName(snapshot.name), snapshot.bytes);
-    await vault.close();
+    const { vault, release } = await deps.openVault(panel);
+    let entry;
+    try {
+      entry = await vault.write(vault.uniqueName(snapshot.name), snapshot.bytes);
+    } finally {
+      // The library goes back to the home tab: no tab lock or auto lock left on this page.
+      await release();
+    }
     await alert('Copy saved', `"${entry.name}" is in your library.`);
   } finally {
     overlay.remove();

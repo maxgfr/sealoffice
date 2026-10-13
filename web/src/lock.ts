@@ -238,7 +238,8 @@ function setIdleMinutes(minutes: number): void {
  * Locks after `idleMinutes()` without input, or after the tab stays hidden for
  * two minutes; only while the library is protected (it can change in Settings).
  */
-export function startAutoLock(vault: Vault): void {
+/** Locks a protected vault after a while idle or hidden; returns a function that stops it. */
+export function startAutoLock(vault: Vault): () => void {
   let idleTimer = 0;
   let hiddenTimer = 0;
   const lockIfProtected = (): void => {
@@ -248,16 +249,22 @@ export function startAutoLock(vault: Vault): void {
     clearTimeout(idleTimer);
     idleTimer = window.setTimeout(lockIfProtected, idleMinutes() * 60 * 1000);
   };
-  for (const type of ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart']) {
-    window.addEventListener(type, reset, { capture: true, passive: true });
-  }
-  document.addEventListener('visibilitychange', () => {
+  const onVisibility = (): void => {
     clearTimeout(hiddenTimer);
     if (document.visibilityState === 'hidden') {
       hiddenTimer = window.setTimeout(lockIfProtected, HIDDEN_LOCK_MS);
     }
-  });
+  };
+  const activity = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart'];
+  for (const type of activity) window.addEventListener(type, reset, { capture: true, passive: true });
+  document.addEventListener('visibilitychange', onVisibility);
   reset();
+  return () => {
+    clearTimeout(idleTimer);
+    clearTimeout(hiddenTimer);
+    for (const type of activity) window.removeEventListener(type, reset, { capture: true });
+    document.removeEventListener('visibilitychange', onVisibility);
+  };
 }
 
 export async function changePassphraseDialog(vault: Vault): Promise<boolean> {

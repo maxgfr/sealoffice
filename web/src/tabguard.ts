@@ -55,6 +55,12 @@ export class TabGuard {
     return granted;
   }
 
+  /** Gives the lock up for good and stops answering other tabs (a page done with the library). */
+  letGo(): void {
+    this.channel.onmessage = null;
+    this.release?.();
+  }
+
   /** Asks the active tab to let go, then waits for the lock. */
   async takeOver(): Promise<void> {
     const waiting = this.hold(false);

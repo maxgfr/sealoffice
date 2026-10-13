@@ -312,6 +312,29 @@ describe('live session', () => {
     expect(host.holdsPen).toBe(true);
   });
 
+  test('a holder that missed snapshots gets the latest with the pen, and its saves are kept', async () => {
+    const stored: string[] = [];
+    const { hub, key, host, guest: a } = await pair({ host: { snapshot: (s) => stored.push(text(s.bytes)) } });
+    const b = new LiveSession(hub.join(), key, { host: false, name: 'B' });
+    const bEditor = new FakeEditor();
+    b.attachEditor(bEditor);
+    await settle();
+    // A and B have no direct link: B never sees A's saves.
+    hub.cut(a.selfId, b.selfId);
+    await host.grantPen(a.selfId);
+    await settle();
+    await a.publish({ name: 'a.docx', bytes: bytes('by A') });
+    await settle();
+    expect(bEditor.opened.at(-1)).toBe('a.docx:v1');
+    await host.grantPen(b.selfId);
+    await settle();
+    expect(b.holdsPen).toBe(true);
+    expect(bEditor.opened.at(-1)).toBe('a.docx:by A');
+    await b.publish({ name: 'a.docx', bytes: bytes('by A, then B') });
+    await settle();
+    expect(stored).toEqual(['by A', 'by A, then B']);
+  });
+
   test('a snapshot is held back while the editor has local changes', async () => {
     const { host, guest, guestEditor } = await pair();
     guestEditor.dirty = true;

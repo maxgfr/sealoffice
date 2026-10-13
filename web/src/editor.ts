@@ -63,6 +63,19 @@ async function fetchWasm(onProgress: (fraction: number | null) => void): Promise
   return new Response(bytes, { headers: { 'Content-Type': 'application/wasm' } });
 }
 
+/** What the page does with a file the editor saves (window.ibisOfficeSaveFile). */
+export type SaveFile = (name: string, bytes: Uint8Array, saveAs: boolean) => Promise<string | null>;
+
+/**
+ * `save` as the editor calls it. The editor hands over a view on its wasm
+ * memory, valid only during the call: the memory can grow (the view is then
+ * empty) or be reused while an asynchronous save is still running. `save`
+ * gets its own copy.
+ */
+export function editorSaveHandler(save: SaveFile): SaveFile {
+  return (name, bytes, saveAs) => save(name, bytes.slice(), saveAs);
+}
+
 /** The uncompressed size the build writes next to the wasm, or 0. */
 async function wasmSize(wasm: URL): Promise<number> {
   try {

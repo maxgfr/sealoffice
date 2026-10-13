@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // The window functions the editor calls for File > Open and File > Save.
 import { SaveSignal } from './autosave';
+import { editorSaveHandler } from './editor';
 import { extension } from './importer';
 import { alert, confirm, errorMessage, form } from './ui';
 import type { Vault } from './vault';
@@ -64,7 +65,7 @@ export class Bridge {
 
   install(): void {
     window.ibisOfficePickFile = () => this.pick();
-    window.ibisOfficeSaveFile = (name, bytes, saveAs) => this.save(name, bytes, saveAs);
+    window.ibisOfficeSaveFile = editorSaveHandler((name, bytes, saveAs) => this.save(name, bytes, saveAs));
   }
 
   /** Runs after every successful vault save (linked disk files). */

@@ -25,13 +25,16 @@ const MIME: Record<string, string> = {
   woff2: 'font/woff2',
 };
 
-export function serve(): ReturnType<typeof Bun.serve> {
+/** Serves dist/; `override` may answer a path (from the site root, e.g. `/main.js`) itself. */
+export function serve(override?: (path: string) => Response | null): ReturnType<typeof Bun.serve> {
   return Bun.serve({
     port: 0,
     hostname: '127.0.0.1',
     async fetch(request) {
       let path = decodeURIComponent(new URL(request.url).pathname);
       if (path.endsWith('/')) path += 'index.html';
+      const replaced = override?.(path);
+      if (replaced) return replaced;
       const file = resolve(DIST, `.${path}`);
       if (!file.startsWith(DIST) || !existsSync(file)) return new Response('not found', { status: 404 });
       const ext = file.split('.').pop() ?? '';

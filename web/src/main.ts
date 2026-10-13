@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Boot: WebGPU check → library (lock screen only when protected) → home screen
 // ⇄ editor screen. The editor starts once per page; Home hides its canvas.
-import { buildInfo, showAbout } from './about';
+import { buildInfo, showAbout, swUrl } from './about';
 import { AppBar } from './appbar';
 import { Bridge, focusEditor } from './bridge';
 import { loadCrypto, type SealCrypto } from './crypto';
@@ -44,8 +44,10 @@ async function registerServiceWorker(): Promise<void> {
   if (!('serviceWorker' in navigator)) return;
   const info = await buildInfo();
   if (!info) return;
-  // The version in the URL makes each release install its own cache.
-  await navigator.serviceWorker.register(`./sw.js?v=${encodeURIComponent(info.version)}`, { scope: './' });
+  // The build in the URL makes each deploy install its own cache: the version
+  // alone stays the same across deploys, and a returning browser kept serving
+  // the files it cached first.
+  await navigator.serviceWorker.register(swUrl(info), { scope: './' });
 }
 
 /** Whether the editor can draw: WebGPU with an adapter, or its WebGL2 fallback. */
@@ -173,7 +175,7 @@ async function receiveShare(actions: DocActions, shared: { link: SharedLink | nu
  * One active tab, then the library: created unprotected on first launch,
  * opened at once when unprotected, through the lock screen in `root` when protected.
  */
-async function openVault(root: HTMLElement): Promise<{ vault: Vault; seal: SealCrypto }> {
+async function openVault(root: HTMLElement): Promise<{ vault: Vault; seal: SealCrypto; release: () => Promise<void> }> {
   const guard = new TabGuard(navigator.locks, new BroadcastChannel(CHANNEL_NAME));
   if (!(await guard.acquire())) await otherTabScreen(root, guard);
   takeYielded();
@@ -192,8 +194,14 @@ async function openVault(root: HTMLElement): Promise<{ vault: Vault; seal: SealC
   } else {
     await lockScreen(root, vault);
   }
-  startAutoLock(vault);
-  return { vault, seal };
+  const stopAutoLock = startAutoLock(vault);
+  /** Done with the library: closed, the tab lock handed back, no auto lock. */
+  const release = async (): Promise<void> => {
+    stopAutoLock();
+    await vault.close();
+    guard.letGo();
+  };
+  return { vault, seal, release };
 }
 
 /** live.html: a live session page (its CSP allows the pinned relays). */

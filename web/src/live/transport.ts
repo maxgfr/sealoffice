@@ -57,6 +57,13 @@ export class MemoryHub {
   }>();
 
   private count = 0;
+  /** Pairs of peers with no link between them, as `a b`. */
+  private readonly cuts = new Set<string>();
+
+  /** No messages between `a` and `b` from now on (a mesh with a missing link). */
+  cut(a: string, b: string): void {
+    this.cuts.add(`${a} ${b}`).add(`${b} ${a}`);
+  }
 
   join(): Transport {
     const selfId = `peer-${++this.count}`;
@@ -74,7 +81,7 @@ export class MemoryHub {
       selfId,
       send: async (data, target) => {
         for (const [id, peer] of this.peers) {
-          if (id === selfId || (target !== undefined && id !== target)) continue;
+          if (id === selfId || (target !== undefined && id !== target) || this.cuts.has(`${selfId} ${id}`)) continue;
           const copy = data.slice();
           setTimeout(() => peer.message(copy, selfId), 0);
         }

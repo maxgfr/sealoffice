@@ -181,6 +181,13 @@ export class LiveSession {
     } else if (this.names.has(holder) && !(await this.awaitRelease(holder, ifIdleMs))) {
       return false;
     }
+    // The new holder edits from the latest version: one it missed (a peer it
+    // has no direct link to) would be overwritten, and its next snapshot would
+    // carry a seq the others already passed.
+    const latest = this.latestSnapshot;
+    if (latest && peer !== this.transport.selfId) {
+      await this.send({ type: 'snapshot', seq: this.order.seq, name: latest.name, bytes: latest.bytes }, peer);
+    }
     this.setPen(peer);
     await this.send({ type: 'pen-grant', peer });
     return true;
@@ -295,8 +302,8 @@ export class LiveSession {
         }
         return;
       case 'snapshot':
-        // Only the pen holder's snapshots count; the host also brings a new guest up to date.
-        if (peer === this.penHolder || (peer === this.hostId && this.latestSnapshot === null)) this.onSnapshot(message);
+        // Only the pen holder's snapshots count; the host also brings peers up to date (a new guest, the next holder).
+        if (peer === this.penHolder || peer === this.hostId) this.onSnapshot(message);
         return;
     }
   }
