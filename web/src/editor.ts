@@ -8,6 +8,16 @@ export interface EditorModule {
   /** Starts the editor; only once per page. `assetBase` must be absolute. */
   run(assetBase: string, fileName?: string, bytes?: Uint8Array): void;
   blank_file(kind: BlankKind): Uint8Array;
+  /** Whether the open document changed since it was loaded or last saved. */
+  is_dirty(): boolean;
+  /**
+   * Starts the ⌘S save path and returns at once; the bytes reach
+   * `ibisOfficeSaveFile` later. False when nothing is savable (no document,
+   * no source or no name). Never call from inside an editor callback.
+   */
+  save_now(): boolean;
+  /** Replaces the open document; read-only when the file cannot be parsed. */
+  open_bytes(name: string, bytes: Uint8Array): void;
 }
 
 const base = (): URL => new URL('./pkg/editor/', location.href);

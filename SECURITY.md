@@ -13,8 +13,13 @@ reproduce, and the impact you expect. You should get a first answer within
 ## Scope
 
 In scope: the vault format and key handling, the seal-crypto wasm module, the
-page and service worker code, the Content Security Policy, and the build and
+page and service worker code (including `live.html` and live sessions), the
+recovery key, passkey and share-link key handling, the Content Security Policy, and the build and
 deployment pipeline.
 
 Bugs in the document editor itself (vendor/ibis-office) that are not specific
 to sealoffice should also be reported to https://github.com/ibisjp/ibis-office.
+
+Out of scope: what live-session relays and peers can observe by design
+(session membership, IP addresses), as described in the README's security
+model.

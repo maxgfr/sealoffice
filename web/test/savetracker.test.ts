@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { SaveTracker, type SavePrompts } from '../src/savetracker';
 import { MemoryStore } from '../src/store';
 import { Vault } from '../src/vault';
 import { crypto } from './seal';
+
+// bun ignores bunfig's [test] timeout, and the default is reset per file: scrypt needs the intended 120 s.
+setDefaultTimeout(120_000);
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 const text = (data: Uint8Array): string => new TextDecoder().decode(data);

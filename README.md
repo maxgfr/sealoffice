@@ -17,6 +17,22 @@ Powered by [ibisOffice](https://github.com/ibisjp/ibis-office).
   encryption) and age files; exports as age files, password-protected Office
   files, or plain Office files.
 - Works offline after the first load (service worker).
+- Saves automatically and keeps the last 10 versions of each document.
+- Backs up the whole vault as one file, `sealoffice-backup-YYYY-MM-DD.tar.age`,
+  and restores it.
+- Creates a recovery key, `sealoffice-recovery-key.txt`, that opens the vault
+  without the passphrase.
+- Optionally unlocks with a passkey (WebAuthn PRF), if your browser and
+  authenticator support it.
+- Links a document to an encrypted file on disk and keeps it in sync (Chrome
+  and Edge only).
+- Shares a document as an encrypted link, with the key in the link or sent
+  separately.
+- Live sessions (`live.html`): edit a document with others, peer to peer. One
+  person holds the "pen" and edits; the others follow.
+- Without WebGPU or WebGL2 the editor cannot run; the page then opens in
+  vault-only mode (import, export, backup, no editing).
+- PDF export and printing are not available.
 
 ## Security model
 
@@ -27,9 +43,27 @@ Powered by [ibisOffice](https://github.com/ibisjp/ibis-office).
   key. Every blob in OPFS is an age file (it starts with
   `age-encryption.org/v1`). The index is authenticated before use, so a
   tampered or swapped blob is reported as an error.
-- **No network after load.** The page fetches its own code and assets from
+- **Recovery key.** The recovery key file is the vault's age identity in
+  plain text. Whoever holds it can read every document and backup, without
+  the passphrase. Keep it offline.
+- **Passkey.** A passkey unlock wraps the vault key with the output of the
+  WebAuthn PRF extension. The wrapped key is stored in OPFS; the PRF output is
+  never stored.
+- **Share links.** The decryption key travels in the link's `#fragment`,
+  which browsers never send to the server. Anyone with the full link can open
+  the document. With "separate key", the link carries no key and you send the
+  key another way.
+- **No network after load.** `index.html` fetches its own code and assets from
   its origin and nothing else. A Content Security Policy restricts scripts,
   connections and frames to the same origin.
+- **Live sessions are the exception.** Only `live.html` opens network
+  connections, and only while you are in a session. Peers find each other
+  through [Trystero](https://github.com/dmotz/trystero) over third-party
+  Nostr relays, and connect with WebRTC using public STUN servers. Document
+  data goes directly between peers, encrypted. The relays see that a session
+  exists and who joins it; peers see each other's IP address. There is no
+  TURN relay, so about 1 connection in 10 fails when both sides are behind a
+  symmetric NAT.
 - **Locking** drops the key and reloads the page, which clears the editor's
   memory.
 
@@ -41,7 +75,8 @@ Powered by [ibisOffice](https://github.com/ibisjp/ibis-office).
 - While the vault is unlocked, the key and the open document are in the
   browser's memory in plaintext. Malware on your machine or a malicious
   browser extension can read them.
-- Clearing site data deletes the vault. Export what you want to keep.
+- Clearing site data deletes the vault. Make backups, and keep the recovery
+  key.
 - A weak passphrase can be brute-forced from a copy of the vault. scrypt slows
   this down; it does not prevent it.
 
@@ -75,6 +110,19 @@ chose when exporting:
 
 ```sh
 age -d -o report.docx report.docx.age
+```
+
+A vault backup is an age file containing a tar archive, encrypted to the vault
+key. Decrypt it with the recovery key:
+
+```sh
+age -d -i sealoffice-recovery-key.txt sealoffice-backup-YYYY-MM-DD.tar.age | tar x
+```
+
+A file linked on disk is also encrypted to the vault key:
+
+```sh
+age -d -i sealoffice-recovery-key.txt file.age
 ```
 
 A password-protected Office export opens in Microsoft Office, LibreOffice or

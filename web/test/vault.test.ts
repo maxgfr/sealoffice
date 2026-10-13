@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { MemoryStore } from '../src/store';
-import { Vault, VaultLockedError } from '../src/vault';
+import { MAX_VERSIONS, parseRecoveryKey, recoveryKeyFile, Vault, VaultLockedError } from '../src/vault';
 import { crypto } from './seal';
+
+// bun ignores bunfig's [test] timeout, and the default is reset per file: scrypt needs the intended 120 s.
+setDefaultTimeout(120_000);
 
 const PASS = 'correct horse battery';
 const AGE_MAGIC = new TextEncoder().encode('age-encryption.org/v1');
@@ -143,12 +146,13 @@ describe('vault', () => {
     expect(text(await reopened.read(a.id))).toBe('version one');
   });
 
-  test('a replace drops the old blob and unlock sweeps orphans', async () => {
+  test('a replace keeps the old blob as a version and unlock sweeps only orphans', async () => {
     const { store, vault } = await fresh();
     const a = await vault.write('a.docx', bytes('one'));
     const b = await vault.write('a.docx', bytes('two'), a.id);
     expect(b.blob).not.toBe(a.blob);
-    expect(store.blobs.has(a.blob)).toBe(false);
+    expect(store.blobs.has(a.blob)).toBe(true);
+    expect(b.versions.map((v) => v.blob)).toEqual([a.blob]);
     const orphan = `docs/${a.id}.deadbeef.age`;
     store.blobs.set(orphan, bytes('stale'));
     vault.lock();
@@ -156,7 +160,127 @@ describe('vault', () => {
     await reopened.unlock(PASS);
     expect(store.blobs.has(orphan)).toBe(false);
     expect(store.blobs.has(b.blob)).toBe(true);
+    expect(store.blobs.has(a.blob)).toBe(true);
     expect(text(await reopened.read(a.id))).toBe('two');
+    expect(text(await reopened.readVersion(a.id, 0))).toBe('one');
+  });
+
+  test('history keeps the last ten versions, newest first', async () => {
+    const { store, vault } = await fresh();
+    const first = await vault.write('a.docx', bytes('v0'));
+    const blobs = [first.blob];
+    for (let n = 1; n <= MAX_VERSIONS + 2; n++) {
+      blobs.push((await vault.write('a.docx', bytes(`v${n}`), first.id)).blob);
+    }
+    const versions = vault.versions(first.id);
+    expect(MAX_VERSIONS).toBe(10);
+    expect(versions).toHaveLength(10);
+    expect(text(await vault.readVersion(first.id, 0))).toBe(`v${MAX_VERSIONS + 1}`);
+    expect(text(await vault.readVersion(first.id, 9))).toBe('v2');
+    expect(text(await vault.read(first.id))).toBe(`v${MAX_VERSIONS + 2}`);
+    // The two oldest blobs are gone from storage, the rest are all kept.
+    expect(store.blobs.has(blobs[0] ?? '')).toBe(false);
+    expect(store.blobs.has(blobs[1] ?? '')).toBe(false);
+    for (const blob of blobs.slice(2)) expect(store.blobs.has(blob)).toBe(true);
+    await expect(vault.readVersion(first.id, 10)).rejects.toThrow('no such version');
+  });
+
+  test('readVersion checks integrity', async () => {
+    const { store, vault } = await fresh();
+    const a = await vault.write('a.docx', bytes('x'.repeat(300)));
+    await vault.write('a.docx', bytes('newer'), a.id);
+    const blob = store.blobs.get(a.blob);
+    if (!blob) throw new Error('blob not stored');
+    blob[blob.length - 10] = (blob[blob.length - 10] ?? 0) ^ 1;
+    await expect(vault.readVersion(a.id, 0)).rejects.toThrow('version 1 of "a.docx" failed its integrity check');
+  });
+
+  test('restoreVersion makes a new current version', async () => {
+    const { vault } = await fresh();
+    const a = await vault.write('a.docx', bytes('one'));
+    await vault.write('a.docx', bytes('two'), a.id);
+    const restored = await vault.restoreVersion(a.id, 0);
+    expect(restored.id).toBe(a.id);
+    expect(text(await vault.read(a.id))).toBe('one');
+    expect(restored.versions).toHaveLength(2);
+    expect(text(await vault.readVersion(a.id, 0))).toBe('two');
+    expect(text(await vault.readVersion(a.id, 1))).toBe('one');
+  });
+
+  test('a version picked by its blob survives a newer write', async () => {
+    const { vault } = await fresh();
+    const a = await vault.write('a.docx', bytes('one'));
+    await vault.write('a.docx', bytes('two'), a.id);
+    const picked = vault.versions(a.id)[0]!.blob;
+    // A flush or an autosave lands between the listing and the restore.
+    await vault.write('a.docx', bytes('three'), a.id);
+    expect(text(await vault.readVersion(a.id, picked))).toBe('one');
+    const restored = await vault.restoreVersion(a.id, picked);
+    expect(text(await vault.read(restored.id))).toBe('one');
+    expect(text(await vault.readVersion(a.id, 0))).toBe('three');
+  });
+
+  test('a version evicted from the history is refused by blob', async () => {
+    const { vault } = await fresh();
+    const a = await vault.write('a.docx', bytes('v0'));
+    await vault.write('a.docx', bytes('v1'), a.id);
+    const oldest = vault.versions(a.id)[0]!.blob;
+    for (let n = 2; n <= MAX_VERSIONS + 1; n++) await vault.write('a.docx', bytes(`v${n}`), a.id);
+    await expect(vault.readVersion(a.id, oldest)).rejects.toThrow('no such version');
+    await expect(vault.restoreVersion(a.id, oldest)).rejects.toThrow('no such version');
+    expect(text(await vault.read(a.id))).toBe(`v${MAX_VERSIONS + 1}`);
+  });
+
+  test('remove deletes every version blob', async () => {
+    const { store, vault } = await fresh();
+    const a = await vault.write('a.docx', bytes('one'));
+    const b = await vault.write('a.docx', bytes('two'), a.id);
+    await vault.remove(a.id);
+    expect(store.blobs.has(a.blob)).toBe(false);
+    expect(store.blobs.has(b.blob)).toBe(false);
+  });
+
+  test('folders and office password survive writes and reloads', async () => {
+    const { store, vault } = await fresh();
+    const a = await vault.write('a.docx', bytes('one'), undefined, { officePassword: 'secret' });
+    const b = await vault.write('b.docx', bytes('two'));
+    await vault.setFolder(a.id, ' Work ');
+    await vault.setFolder(b.id, 'Archive');
+    expect(vault.folders()).toEqual(['Archive', 'Work']);
+    await vault.write('a.docx', bytes('one, edited'), a.id);
+    expect(vault.entry(a.id)?.folder).toBe('Work');
+    expect(vault.entry(a.id)?.officePassword).toBe('secret');
+    await vault.setFolder(b.id, null);
+    expect(vault.entry(b.id)?.folder).toBeUndefined();
+    expect(vault.folders()).toEqual(['Work']);
+    await expect(vault.setFolder(a.id, 'a/b')).rejects.toThrow('folder names cannot contain');
+    vault.lock();
+    const reopened = new Vault(store, crypto);
+    await reopened.unlock(PASS);
+    expect(reopened.entry(a.id)?.folder).toBe('Work');
+    expect(reopened.entry(a.id)?.officePassword).toBe('secret');
+    expect(reopened.folders()).toEqual(['Work']);
+  });
+
+  test('a version 1 index is migrated to version 2 on unlock', async () => {
+    const { store, vault } = await fresh();
+    const a = await vault.write('old.docx', bytes('from v0.1'));
+    vault.lock();
+    const wrapped = await store.get('identity.age');
+    if (!wrapped) throw new Error('no identity');
+    const identity = crypto.Identity.unlock(wrapped, PASS);
+    const v1 = { version: 1, docs: [{ id: a.id, name: a.name, size: a.size, created: a.created, modified: a.modified, sha256: a.sha256, blob: a.blob }] };
+    await store.put('index.age', identity.encrypt(bytes(JSON.stringify(v1))));
+    const reopened = new Vault(store, crypto);
+    await reopened.unlock(PASS);
+    expect(reopened.list()).toEqual([{ ...a, versions: [] }]);
+    expect(text(await reopened.read(a.id))).toBe('from v0.1');
+    const index = await store.get('index.age');
+    if (!index) throw new Error('no index');
+    const saved = JSON.parse(text(identity.decrypt(index))) as { version: number; docs: { versions: unknown[] }[] };
+    identity.free();
+    expect(saved.version).toBe(2);
+    expect(saved.docs[0]?.versions).toEqual([]);
   });
 
   test('close waits for a pending write before locking', async () => {
@@ -167,6 +291,42 @@ describe('vault', () => {
     await closed;
     expect(entry.name).toBe('a.docx');
     expect(vault.unlocked).toBe(false);
+  });
+
+  test('recovery key resets the passphrase', async () => {
+    const { store, vault } = await fresh();
+    const a = await vault.write('a.docx', bytes('rescued'));
+    await expect(vault.recoveryKey('wrong passphrase!')).rejects.toThrow();
+    const key = await vault.recoveryKey(PASS);
+    expect(key).toMatch(/^AGE-SECRET-KEY-1[0-9A-Z]+$/);
+    vault.lock();
+    const file = recoveryKeyFile(key, new Date(0));
+    expect(file.startsWith('# ')).toBe(true);
+    expect(parseRecoveryKey(file)).toBe(key);
+    const reopened = new Vault(store, crypto);
+    await reopened.resetWithRecoveryKey(file, 'brand new passphrase');
+    expect(reopened.unlocked).toBe(true);
+    expect(text(await reopened.read(a.id))).toBe('rescued');
+    reopened.lock();
+    const again = new Vault(store, crypto);
+    await expect(again.unlock(PASS)).rejects.toThrow('wrong passphrase');
+    await again.unlock('brand new passphrase');
+    expect(text(await again.read(a.id))).toBe('rescued');
+  });
+
+  test('a foreign or malformed recovery key changes nothing', async () => {
+    const { store, vault } = await fresh();
+    vault.lock();
+    const before = store.blobs.get('identity.age');
+    const other = crypto.Identity.generate();
+    const foreignKey = text(crypto.decrypt_passphrase(other.wrap('x'), 'x'));
+    other.free();
+    const target = new Vault(store, crypto);
+    await expect(target.resetWithRecoveryKey(foreignKey, 'new passphrase!')).rejects.toThrow('does not open this vault');
+    await expect(target.resetWithRecoveryKey('hello', 'new passphrase!')).rejects.toThrow('not a recovery key');
+    expect(target.unlocked).toBe(false);
+    expect(store.blobs.get('identity.age')).toBe(before);
+    await target.unlock(PASS);
   });
 
   test('wipe deletes everything', async () => {

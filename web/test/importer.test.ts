@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { exportDocument } from '../src/exporter';
 import { detect, importFile, isDocumentName, type AskSecret } from '../src/importer';
 import { crypto } from './seal';
+
+// bun ignores bunfig's [test] timeout, and the default is reset per file: scrypt needs the intended 120 s.
+setDefaultTimeout(120_000);
 
 const docx = await Bun.file(
   new URL('../../vendor/ibis-office/test/benchmark/securities-registration-statement.docx', import.meta.url),
@@ -24,12 +27,15 @@ describe('importer', () => {
   test('plain documents pass through', async () => {
     const result = await importFile({ name: 'a.docx', bytes: docx }, crypto, never);
     expect(result?.name).toBe('a.docx');
+    expect(result?.officePassword).toBeUndefined();
     expect(result?.bytes).toEqual(docx);
   });
 
   test('Office-encrypted files ask for the password', async () => {
     const file = { name: 'p.docx', bytes: crypto.office_protect(docx, 'office pw') };
-    expect((await importFile(file, crypto, answer('office pw')))?.bytes).toEqual(docx);
+    const imported = await importFile(file, crypto, answer('office pw'));
+    expect(imported?.bytes).toEqual(docx);
+    expect(imported?.officePassword).toBe('office pw');
     await expect(importFile(file, crypto, answer('nope'))).rejects.toThrow('wrong password');
     expect(await importFile(file, crypto, answer(null))).toBeNull();
   });

@@ -1,5 +1,77 @@
+diff --git a/crates/ibis-doc-model/src/command.rs b/crates/ibis-doc-model/src/command.rs
+index ee592e7..cd26f3c 100644
+--- a/crates/ibis-doc-model/src/command.rs
++++ b/crates/ibis-doc-model/src/command.rs
+@@ -945,11 +945,13 @@ pub struct Document {
+     presentation: Presentation,
+     undo: Vec<Vec<Command>>,
+     redo: Vec<Vec<Command>>,
++    /// Bumped by every change to the presentation, undo and redo included.
++    generation: u64,
+ }
+ 
+ impl Document {
+     pub fn new(presentation: Presentation) -> Self {
+-        Self { presentation, undo: Vec::new(), redo: Vec::new() }
++        Self { presentation, undo: Vec::new(), redo: Vec::new(), generation: 0 }
+     }
+ 
+     pub fn presentation(&self) -> &Presentation {
+@@ -961,6 +963,12 @@ impl Document {
+         &mut self.presentation
+     }
+ 
++    /// Changes with each edit, undo or redo: a presentation saved at one
++    /// generation is unchanged while the generation is the same.
++    pub fn generation(&self) -> u64 {
++        self.generation
++    }
++
+     pub fn can_undo(&self) -> bool {
+         !self.undo.is_empty()
+     }
+@@ -976,6 +984,7 @@ impl Document {
+         if !inverses.is_empty() {
+             self.undo.push(inverses);
+             self.redo.clear();
++            self.generation += 1;
+         }
+         Ok(())
+     }
+@@ -996,6 +1005,7 @@ impl Document {
+             None => self.undo.push(inverses),
+         }
+         self.redo.clear();
++        self.generation += 1;
+         Ok(())
+     }
+ 
+@@ -1003,6 +1013,7 @@ impl Document {
+     /// user abandoned (such as a new text box left empty).
+     pub fn retract_last(&mut self) -> bool {
+         let Some(step) = self.undo.pop() else { return false };
++        self.generation += 1;
+         self.apply_all(step).is_ok()
+     }
+ 
+@@ -1011,6 +1022,7 @@ impl Document {
+         match self.apply_all(step) {
+             Ok(inverses) => {
+                 self.redo.push(inverses);
++                self.generation += 1;
+                 true
+             }
+             Err(_) => false,
+@@ -1022,6 +1034,7 @@ impl Document {
+         match self.apply_all(step) {
+             Ok(inverses) => {
+                 self.undo.push(inverses);
++                self.generation += 1;
+                 true
+             }
+             Err(_) => false,
 diff --git a/crates/ibis-office-app/src/lib.rs b/crates/ibis-office-app/src/lib.rs
-index 75be011..6a1c066 100644
+index 75be011..94dfbcc 100644
 --- a/crates/ibis-office-app/src/lib.rs
 +++ b/crates/ibis-office-app/src/lib.rs
 @@ -919,11 +919,19 @@ mod web {
@@ -39,7 +111,7 @@ index 75be011..6a1c066 100644
          });
          APPLICATION.with(|app| *app.borrow_mut() = Some(handle));
          Ok(())
-@@ -983,6 +996,36 @@ mod web {
+@@ -983,6 +996,102 @@ mod web {
          /// resolves to `{ name, bytes }`, or to `null` when cancelled.
          #[wasm_bindgen(catch, js_name = ibisOfficePickFile)]
          fn pick_file_js() -> Result<js_sys::Promise, JsValue>;
@@ -63,6 +135,72 @@ index 75be011..6a1c066 100644
 +        ibis_pptx::blank_file(kind).map_err(|e| js_sys::Error::new(&e.to_string()).into())
 +    }
 +
++    /// Whether the open document has edits not yet saved.
++    ///
++    /// Like `save_now` and `open_bytes`, for the page to call from its own
++    /// events only: never from inside the editor (a callback the editor runs),
++    /// which already holds the app and would borrow it twice.
++    #[wasm_bindgen]
++    pub fn is_dirty() -> bool {
++        with_editor(|editor, _, _| editor.has_document && editor.document.generation() != editor.saved_generation).unwrap_or(false)
++    }
++
++    /// Save as ⌘S does. `false` when there is nothing that can be saved (no
++    /// document, or one with no source or no name); otherwise `true` once the
++    /// save has started: `ibisOfficeSaveFile` is called later, from the
++    /// editor's executor, and the outcome shows in the status bar.
++    #[wasm_bindgen]
++    pub fn save_now() -> bool {
++        with_editor(|editor, window, cx| {
++            if !editor.has_document || editor.source.is_none() || editor.file_name.is_none() {
++                return false;
++            }
++            editor.save(&super::Save, window, cx);
++            true
++        })
++        .unwrap_or(false)
++    }
++
++    /// Open `bytes`, the file `name`, in place of the open document. Opened
++    /// with its source, so it can be saved; read only if that fails.
++    #[wasm_bindgen]
++    pub fn open_bytes(name: String, bytes: Vec<u8>) {
++        let name: SharedString = name.into();
++        let opened = with_editor(|editor, window, cx| match ibis_pptx::open(bytes.clone()) {
++            Ok(opened) => {
++                editor.load(opened.presentation, name.clone(), window, cx);
++                editor.source = Some(Arc::new(opened.source));
++            }
++            Err(err) => {
++                log::error!("{err}");
++                match ibis_pptx::read(&bytes) {
++                    Ok(presentation) => editor.load(presentation, name.clone(), window, cx),
++                    Err(err) => editor.set_status(crate::shell::i18n::format("file.open-failed", &[("name", &name), ("error", &err)]), cx),
++                }
++            }
++        });
++        if opened.is_none() {
++            log::error!("no editor to open {name} in");
++        }
++    }
++
++    /// Run `f` on the active window's editor; `None` before `run` or without one.
++    fn with_editor<R>(f: impl FnOnce(&mut crate::shell::editor::SlideEditor, &mut Window, &mut Context<crate::shell::editor::SlideEditor>) -> R) -> Option<R> {
++        APPLICATION.with(|app| {
++            let app = app.borrow();
++            app.as_ref()?.update(|cx| {
++                let window = cx.active_window().or_else(|| cx.windows().first().copied())?;
++                let root = window.downcast::<gpui_kit::component::Root>()?;
++                root.update(cx, |root, window, cx| {
++                    let editor = root.view().clone().downcast::<crate::shell::editor::SlideEditor>().ok()?;
++                    Some(editor.update(cx, |editor, cx| f(editor, window, cx)))
++                })
++                .ok()
++                .flatten()
++            })
++        })
++    }
++
 +    /// Hand the page a saved file; the name it was stored under, or `None` if cancelled.
 +    pub(crate) async fn save_file(name: String, bytes: Vec<u8>, save_as: bool) -> Result<Option<String>, String> {
 +        let describe = |err: JsValue| {
@@ -76,8 +214,70 @@ index 75be011..6a1c066 100644
      }
  
      /// Let the user choose a file; its name and contents, or `None` if cancelled.
+diff --git a/crates/ibis-office-app/src/shell/editor.rs b/crates/ibis-office-app/src/shell/editor.rs
+index 4ac2294..7bd1195 100644
+--- a/crates/ibis-office-app/src/shell/editor.rs
++++ b/crates/ibis-office-app/src/shell/editor.rs
+@@ -331,6 +331,9 @@ pub struct SlideEditor {
+     #[cfg(target_os = "windows")]
+     wheel_notches: f32,
+     pub(crate) document: Document,
++    /// The document's generation when it was last opened or saved; it has
++    /// unsaved edits while its generation differs.
++    pub(crate) saved_generation: u64,
+     pub(crate) current_slide: SlideId,
+     pub(crate) selection: Option<ShapeId>,
+     pub(crate) tool: Tool,
+@@ -541,6 +544,7 @@ impl SlideEditor {
+             #[cfg(target_os = "windows")]
+             wheel_notches: 0.0,
+             document: Document::new(presentation),
++            saved_generation: 0,
+             current_slide,
+             selection: None,
+             tool: Tool::Select,
+@@ -657,6 +661,7 @@ impl SlideEditor {
+         let is_reading = presentation.flow.as_ref().is_some_and(|f| f.view_mode == ibis_doc_model::DocumentViewMode::Reading);
+         let is_outline = presentation.flow.as_ref().is_some_and(|f| f.view_mode == ibis_doc_model::DocumentViewMode::Outline);
+         self.document = Document::new(presentation);
++        self.saved_generation = self.document.generation();
+         self.source = None;
+         #[cfg(not(target_family = "wasm"))]
+         {
+@@ -1445,6 +1450,7 @@ impl SlideEditor {
+             };
+             let pres = self.presentation().clone();
+             let doc = self.document.clone();
++            let saved_generation = self.saved_generation;
+             let name = self.file_name.clone().unwrap_or_else(|| self.workbook_display_name().into());
+             let path = self.file_path();
+             let source = self.source.clone();
+@@ -1458,6 +1464,7 @@ impl SlideEditor {
+             crate::open_window_with(cx, move |editor, window, cx| {
+                 editor.load(pres, name.clone(), window, cx);
+                 editor.document = doc;
++                editor.saved_generation = saved_generation;
+                 editor.set_file_path(path);
+                 editor.source = source;
+                 editor.workbook_id = wb_id;
+@@ -1477,6 +1484,7 @@ impl SlideEditor {
+             };
+             let pres = self.presentation().clone();
+             let doc = self.document.clone();
++            let saved_generation = self.saved_generation;
+             let name = self.file_name.clone().unwrap_or_else(|| crate::shell::i18n::text("_shell.document-1-docx").into());
+             let path = self.file_path();
+             let source = self.source.clone();
+@@ -1490,6 +1498,7 @@ impl SlideEditor {
+             crate::open_window_with(cx, move |editor, window, cx| {
+                 editor.load(pres, name.clone(), window, cx);
+                 editor.document = doc;
++                editor.saved_generation = saved_generation;
+                 editor.set_file_path(path);
+                 editor.source = source;
+                 editor.document_id = doc_id;
 diff --git a/crates/ibis-office-app/src/shell/save.rs b/crates/ibis-office-app/src/shell/save.rs
-index 8698efe..3504008 100644
+index 8698efe..5f6cef0 100644
 --- a/crates/ibis-office-app/src/shell/save.rs
 +++ b/crates/ibis-office-app/src/shell/save.rs
 @@ -29,11 +29,7 @@ impl SlideEditor {
@@ -93,7 +293,7 @@ index 8698efe..3504008 100644
      }
  
      /// ⌘⇧S: ask where, and save there.
-@@ -70,21 +66,49 @@ impl SlideEditor {
+@@ -70,21 +66,52 @@ impl SlideEditor {
              .detach();
          }
          #[cfg(target_family = "wasm")]
@@ -119,6 +319,8 @@ index 8698efe..3504008 100644
 +                return cx.notify();
 +            }
 +        };
++        // The edits saved are those made before the bytes; later ones stay unsaved.
++        let generation = self.document.generation();
 +        let bytes = match self.save_bytes(&name) {
 +            Ok(bytes) => bytes,
 +            Err(err) => return self.report_save(Err(err), cx),
@@ -130,6 +332,7 @@ index 8698efe..3504008 100644
 +                    let name: SharedString = name.into();
 +                    window.set_window_title(&format!("{name} - ibisOffice"));
 +                    this.file_name = Some(name);
++                    this.saved_generation = generation;
 +                    this.report_save(Ok(()), cx);
 +                }
 +                Ok(None) => {}
@@ -151,7 +354,7 @@ index 8698efe..3504008 100644
          // A workbook saved as .csv: the sheet shown, as CSV (Excel's 「CSV UTF-8」).
          let csv = self.is_workbook() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv"));
          let tsv = self.is_workbook() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("tsv") || e.eq_ignore_ascii_case("tab") || e.eq_ignore_ascii_case("txt"));
-@@ -93,7 +117,7 @@ impl SlideEditor {
+@@ -93,7 +120,7 @@ impl SlideEditor {
          let potx = self.is_presentation() && path.extension().and_then(|e| e.to_str()).is_some_and(ibis_pptx::is_template);
          let dotx = self.is_document() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("dotx") || e.eq_ignore_ascii_case("dotm"));
          let pptx = self.is_presentation() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pptx") || e.eq_ignore_ascii_case("pptm"));
@@ -160,7 +363,7 @@ index 8698efe..3504008 100644
              let index = self.presentation().slide_index(self.current_slide).unwrap_or(0);
              ibis_pptx::csv::sheet_to_csv(self.presentation(), index)
          } else if tsv {
-@@ -107,7 +131,15 @@ impl SlideEditor {
+@@ -107,7 +134,16 @@ impl SlideEditor {
              source.save_presentation(self.presentation(), ibis_pptx::SaveOptions::default()).map_err(|e| e.to_string())?
          } else {
              source.save(self.presentation(), ibis_pptx::SaveOptions::default()).map_err(|e| e.to_string())?
@@ -171,13 +374,22 @@ index 8698efe..3504008 100644
 +    /// Save to `path`, and make it the file's path.
 +    #[cfg(not(target_family = "wasm"))]
 +    pub(crate) fn save_to(&mut self, path: std::path::PathBuf, window: &mut Window) -> Result<(), String> {
++        let generation = self.document.generation();
 +        let bytes = self.save_bytes(&path.to_string_lossy())?;
 +        let csv = self.is_workbook() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv"));
 +        let tsv = self.is_workbook() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("tsv") || e.eq_ignore_ascii_case("tab") || e.eq_ignore_ascii_case("txt"));
          if self.is_workbook() {
              let override_opt = self.sheet_state().and_then(|s| s.always_create_backup);
              if let Ok(Some(backup_path)) = crate::xlsx::backup_save::create_backup_copy_if_enabled(&path, override_opt) {
-@@ -129,7 +161,6 @@ impl SlideEditor {
+@@ -121,6 +157,7 @@ impl SlideEditor {
+         window.set_window_title(&format!("{name} - ibisOffice"));
+         self.file_name = Some(name);
+         self.path = Some(path);
++        self.saved_generation = generation;
+         if self.is_workbook() || self.is_presentation() {
+             self.cleanup_active_autorecover_file();
+             self.is_recovered = false;
+@@ -129,7 +166,6 @@ impl SlideEditor {
          Ok(())
      }
  

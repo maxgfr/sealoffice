@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // The window functions the editor calls for File > Open and File > Save.
+import { SaveSignal } from './autosave';
 import { extension } from './importer';
-import { confirm, form } from './ui';
+import { alert, confirm, errorMessage, form } from './ui';
 import type { Vault } from './vault';
 import { SaveTracker } from './savetracker';
 import type { OpenDoc, VaultView } from './vaultview';
@@ -21,6 +22,9 @@ declare global {
 
 export class Bridge {
   private readonly tracker: SaveTracker;
+  /** Fires once each editor save has been written to the vault (or failed). */
+  readonly saved = new SaveSignal();
+  private afterSave: ((id: string, bytes: Uint8Array) => Promise<void>) | null = null;
 
   constructor(
     vault: Vault,
@@ -47,12 +51,36 @@ export class Bridge {
 
   install(): void {
     window.ibisOfficePickFile = () => this.pick();
-    window.ibisOfficeSaveFile = (name, bytes, saveAs) => this.tracker.save(name, bytes, saveAs);
+    window.ibisOfficeSaveFile = (name, bytes, saveAs) => this.save(name, bytes, saveAs);
+  }
+
+  /** Runs after every successful vault save (linked disk files). */
+  setAfterSave(hook: (id: string, bytes: Uint8Array) => Promise<void>): void {
+    this.afterSave = hook;
   }
 
   /** Records the document handed to the editor. */
   track(doc: OpenDoc): void {
     this.tracker.opened(doc);
+  }
+
+  private async save(name: string, bytes: Uint8Array, saveAs: boolean): Promise<string | null> {
+    try {
+      const stored = await this.tracker.save(name, bytes, saveAs);
+      this.saved.emit({ name: stored });
+      const id = this.tracker.currentId;
+      if (stored !== null && id !== null && this.afterSave) {
+        // The vault copy is safe; a failing extra copy is reported without failing the save.
+        this.afterSave(id, bytes).catch((error: unknown) => {
+          console.error(error);
+          void alert('Linked file not updated', `The vault has the document, but its file on disk was not updated: ${errorMessage(error)}`);
+        });
+      }
+      return stored;
+    } catch (error) {
+      this.saved.emit({ error });
+      throw error;
+    }
   }
 
   private async pick(): Promise<PickedFile | null> {

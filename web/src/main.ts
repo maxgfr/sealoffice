@@ -2,13 +2,17 @@
 // Boot: WebGPU check → lock screen → vault → full-screen editor.
 import { buildInfo, showAbout } from './about';
 import { Bridge, focusEditor } from './bridge';
-import { loadCrypto } from './crypto';
+import { loadCrypto, type SealCrypto } from './crypto';
 import { assetBase, loadEditor, type EditorModule } from './editor';
-import { confirmLock, lockScreen, startAutoLock } from './lock';
+import { Autosaver } from './autosave';
+import { lockNow, lockScreen, setSaveBeforeLock, startAutoLock, unloading } from './lock';
 import { OpfsStore } from './store';
+import { DiskLinks, diskLinksSupported, IdbHandleStore } from './diskfile';
+import { parseShare, type SharedLink } from './share';
+import { CHANNEL_NAME, TabGuard } from './tabguard';
 import { alert, button, errorMessage, h } from './ui';
 import { Vault } from './vault';
-import { VaultView } from './vaultview';
+import { savedThenRead, VaultView } from './vaultview';
 
 interface TrustedTypesFactory {
   createPolicy(name: string, rules: { createScriptURL: (url: string) => string }): unknown;
@@ -38,14 +42,64 @@ async function registerServiceWorker(): Promise<void> {
   await navigator.serviceWorker.register(`./sw.js?v=${encodeURIComponent(info.version)}`, { scope: './' });
 }
 
-async function hasWebGPU(): Promise<boolean> {
-  if (!('gpu' in navigator)) return false;
+/** Whether the editor can draw: WebGPU with an adapter, or its WebGL2 fallback. */
+async function hasGraphics(): Promise<boolean> {
   const gpu = (navigator as { gpu?: { requestAdapter(): Promise<unknown> } }).gpu;
+  if (gpu) {
+    try {
+      if ((await gpu.requestAdapter()) != null) return true;
+    } catch (error) {
+      console.warn('WebGPU unavailable, trying WebGL2:', error);
+    }
+  }
+  return document.createElement('canvas').getContext('webgl2') !== null;
+}
+
+const YIELDED_FLAG = 'sealoffice-yielded';
+
+/** Remembers, across the reload that follows, that this tab handed the vault to another one. */
+function markYielded(): void {
   try {
-    return (await gpu?.requestAdapter()) != null;
-  } catch {
+    sessionStorage.setItem(YIELDED_FLAG, '1');
+  } catch (error) {
+    console.warn('could not remember the handover:', error);
+  }
+}
+
+function takeYielded(): boolean {
+  try {
+    const yielded = sessionStorage.getItem(YIELDED_FLAG) !== null;
+    sessionStorage.removeItem(YIELDED_FLAG);
+    return yielded;
+  } catch (error) {
+    console.warn('could not read the handover flag:', error);
     return false;
   }
+}
+
+/** Shown while another tab has the vault; resolves once this tab has taken it over. */
+function otherTabScreen(root: HTMLElement, guard: TabGuard): Promise<void> {
+  return new Promise((resolve) => {
+    const error = h('p', { class: 'form-error', role: 'alert' });
+    const use = button('Use here', () => {
+      use.disabled = true;
+      use.textContent = 'Waiting for the other tab…';
+      guard.takeOver().then(resolve, (e: unknown) => {
+        error.textContent = errorMessage(e);
+        use.disabled = false;
+        use.textContent = 'Use here';
+      });
+    }, 'primary');
+    root.replaceChildren(h(
+      'main',
+      { class: 'card lock' },
+      h('h1', {}, takeYielded() ? 'This vault is now open in another tab' : 'Open in another tab'),
+      h('p', { class: 'muted' }, 'sealoffice works in one tab at a time. Using it here saves and locks the other tab.'),
+      error,
+      h('div', { class: 'actions' }, use),
+    ));
+    use.focus();
+  });
 }
 
 function message(root: HTMLElement, title: string, text: string): void {
@@ -78,15 +132,85 @@ function progressStatus(): { el: HTMLElement; update: (fraction: number | null) 
   };
 }
 
-async function boot(root: HTMLElement): Promise<void> {
-  if (!(await hasWebGPU())) {
-    message(root, 'WebGPU required', 'sealoffice needs WebGPU: use a recent Chrome, Edge, or Safari 26+.');
-    return;
+/** Takes a share link out of the address bar (so it is not kept in history) and parses it. */
+function takeShareLink(): { link: SharedLink | null; error: unknown } {
+  if (!/^#[sk]=/.test(location.hash)) return { link: null, error: null };
+  const hash = location.hash;
+  history.replaceState(null, '', location.pathname + location.search);
+  try {
+    return { link: parseShare(hash), error: null };
+  } catch (error) {
+    return { link: null, error };
   }
+}
+
+/** Disk links where the browser supports them (Chrome, Edge). */
+async function loadDiskLinks(vault: Vault, seal: SealCrypto): Promise<DiskLinks | null> {
+  if (!diskLinksSupported()) return null;
+  const links = new DiskLinks(new IdbHandleStore(), vault, seal);
+  await links.load();
+  return links;
+}
+
+/** Once the vault is open: offers to store the shared document. */
+async function receiveShare(view: VaultView, shared: { link: SharedLink | null; error: unknown }): Promise<void> {
+  try {
+    if (shared.error) throw shared.error;
+    if (shared.link) await view.receiveShared(shared.link);
+  } catch (error) {
+    console.error(error);
+    await alert('Could not open the shared document', errorMessage(error));
+  }
+}
+
+/** One active tab, then the lock screen in `root`: resolves once the vault is open. */
+async function openVault(root: HTMLElement): Promise<{ vault: Vault; seal: SealCrypto }> {
+  const guard = new TabGuard(navigator.locks, new BroadcastChannel(CHANNEL_NAME));
+  if (!(await guard.acquire())) await otherTabScreen(root, guard);
+  takeYielded();
   const seal = await loadCrypto();
   const vault = new Vault(new OpfsStore(), seal);
-  await lockScreen(root, vault);
+  guard.setYieldHandler(async () => {
+    markYielded();
+    await lockNow(vault, false);
+  });
+  await lockScreen(root, vault, seal);
   startAutoLock(vault);
+  return { vault, seal };
+}
+
+/** live.html: a live session page (its CSP allows the pinned relays). */
+function isLivePage(): boolean {
+  return location.pathname.endsWith('/live.html');
+}
+
+async function boot(root: HTMLElement): Promise<void> {
+  const graphics = await hasGraphics();
+  if (isLivePage()) {
+    // Split into its own chunk: index.html never loads the network code.
+    const { bootLive } = await import('./live/ui');
+    await bootLive(root, { graphics, openVault });
+    return;
+  }
+  const shared = takeShareLink();
+  const { vault, seal } = await openVault(root);
+
+  if (!graphics) {
+    // Vault-only mode: the editor is never downloaded.
+    const view = new VaultView(vault, seal, () => Promise.reject(new Error('editing is unavailable in this browser')));
+    view.disableEditing();
+    const links = await loadDiskLinks(vault, seal);
+    if (links) view.attachDiskLinks(links);
+    await receiveShare(view, shared);
+    document.body.append(h(
+      'nav',
+      { class: 'pill', 'aria-label': 'sealoffice' },
+      button('Lock', () => void lockNow(vault)),
+      button('About', () => void showAbout()),
+    ));
+    await view.show({ choose: true, closable: false });
+    return;
+  }
 
   const status = progressStatus();
   const editorLoad: Promise<EditorModule> = loadEditor(status.update);
@@ -94,24 +218,47 @@ async function boot(root: HTMLElement): Promise<void> {
   const view = new VaultView(vault, seal, () => editorLoad);
   const bridge = new Bridge(vault, view);
   bridge.install();
+  const links = await loadDiskLinks(vault, seal);
+  if (links) {
+    view.attachDiskLinks(links);
+    bridge.setAfterSave((id, bytes) => links.write(id, bytes));
+  }
+  await receiveShare(view, shared);
 
-  let editorOpen = false;
+  let running: EditorModule | null = null;
+  /** Vault in choose mode: the picked document replaces the open one, once that one is saved. */
+  const switchDocument = async (editor: EditorModule): Promise<void> => {
+    const picked = await view.show({ choose: true, closable: true });
+    const doc = picked && (await savedThenRead(picked, () => view.saveOpenDoc('Open'), (id) => vault.read(id)));
+    if (doc) {
+      bridge.track(doc);
+      editor.open_bytes(doc.name, doc.bytes);
+    }
+    focusEditor();
+  };
+  const saveState = h('span', { class: 'muted small', role: 'status' });
   const toolbar = h(
     'nav',
     { class: 'pill', 'aria-label': 'sealoffice' },
     button('Vault', () => {
-      if (editorOpen) void view.show({ choose: false, closable: true }).then(focusEditor);
+      if (running) switchDocument(running).catch((error: unknown) => alert('Could not open the document', errorMessage(error)));
     }),
     button('Export', () => {
-      const id = bridge.current;
-      if (!id) {
-        void alert('Nothing to export', 'Save the document to the vault first.');
-        return;
-      }
-      view.exportDoc(id).catch((error: unknown) => alert('Export failed', errorMessage(error)));
+      const exportOpen = async (): Promise<void> => {
+        // A never-saved document gets its vault id from this save.
+        if (!(await view.saveOpenDoc('Export'))) return;
+        const id = bridge.current;
+        if (!id) {
+          await alert('Nothing to export', 'Save the document to the vault first.');
+          return;
+        }
+        await view.exportDoc(id);
+      };
+      exportOpen().catch((error: unknown) => alert('Export failed', errorMessage(error)));
     }),
-    button('Lock', () => void confirmLock(vault, editorOpen)),
+    button('Lock', () => void lockNow(vault)),
     button('About', () => void showAbout()),
+    saveState,
   );
   document.body.append(toolbar);
 
@@ -121,8 +268,50 @@ async function boot(root: HTMLElement): Promise<void> {
   bridge.track(first);
   root.replaceChildren();
   editor.run(assetBase(), first.name, first.bytes);
-  editorOpen = true;
+  running = editor;
   toolbar.classList.add('over-editor');
+  const autosaver = startAutosave(editor, bridge, saveState);
+  view.attachEditor({
+    autosaver,
+    currentId: () => bridge.current,
+    open: (doc) => {
+      bridge.track(doc);
+      editor.open_bytes(doc.name, doc.bytes);
+    },
+  });
+}
+
+/** Autosave, saving before lock and on hide, the leave-page guard and the toolbar's save state. */
+function startAutosave(editor: EditorModule, bridge: Bridge, saveState: HTMLElement): Autosaver {
+  const autosaver = new Autosaver(editor, bridge.saved);
+  let failure: string | null = null;
+  const report = (error: unknown): void => {
+    console.error('automatic save failed:', error);
+    failure = errorMessage(error);
+    showState();
+  };
+  const showState = (): void => {
+    const dirty = autosaver.dirty;
+    if (!dirty) failure = null;
+    saveState.textContent = failure ? 'Not saved' : dirty ? 'Modified' : 'Saved';
+    saveState.title = failure ?? '';
+  };
+  autosaver.start(report);
+  setSaveBeforeLock(() => autosaver.flush());
+  // ⌘S failures are shown by the editor itself; this only refreshes the state.
+  bridge.saved.subscribe(showState);
+  window.setInterval(showState, 1000);
+  showState();
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'hidden') return;
+    autosaver.flush().then((result) => {
+      if (result === 'timeout') report(new Error('the save did not finish'));
+    }, report);
+  });
+  window.addEventListener('beforeunload', (event) => {
+    if (!unloading() && autosaver.dirty) event.preventDefault();
+  });
+  return autosaver;
 }
 
 installTrustedTypesPolicy();

@@ -179,3 +179,37 @@ input {
   .progress-bar { transition: none; }
   .progress.indeterminate .progress-bar { animation: none; width: 100%; }
 }
+
+/* Vault list: search, sort and folder filter; folder groups; drop target. */
+.filter-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.filter-row .search { flex: 1 1 200px; width: auto; }
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 7px 8px;
+}
+.folder-heading { padding: 12px 8px 4px; font-size: 0.8rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.vault.dropping { outline: 2px dashed var(--accent); outline-offset: -8px; }
+.storage { margin: 0; }
+.storage button.link { font-weight: 400; color: var(--accent); }
+.report { margin: 0 0 12px; padding-left: 18px; display: grid; gap: 4px; overflow-wrap: anywhere; }
+.dialog .doc-list { max-height: 50vh; overflow: auto; }
+
+/* Recovery key and the save state in the toolbar. */
+.recovery-key {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}
+.field:has(input[type="checkbox"]) { display: flex; align-items: center; gap: 8px; }
+.field input[type="checkbox"] { width: auto; }
+.pill [role="status"] { align-self: center; padding: 0 8px; font-size: 0.8rem; }

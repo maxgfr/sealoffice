@@ -123,9 +123,12 @@ if [[ -f web/bun.lock || -f web/bun.lockb ]]; then
 else
   (cd web && bun install)
 fi
-bun build web/src/main.ts --outdir dist --minify --target browser
+# --splitting: the live session code (and Trystero) is a chunk only live.html loads.
+bun build web/src/main.ts --outdir dist --minify --target browser --splitting
 bun build web/src/sw.ts --outfile dist/sw.js --minify --target browser
 cp web/index.html dist/
+[[ -f web/live.html ]] || die "missing web/live.html"
+cp web/live.html dist/
 for css in web/src/*.css; do
   [[ -e "$css" ]] && cp "$css" dist/
 done
@@ -133,7 +136,7 @@ if [[ -d web/public ]]; then cp -R web/public/. dist/; fi
 cp LICENSE NOTICE dist/
 cp "$VENDOR/www/license.md" dist/third-party-licenses.md
 
-for f in dist/index.html dist/main.js dist/sw.js dist/pkg/editor/ibis_office_app_bg.wasm dist/pkg/seal/seal_crypto_bg.wasm; do
+for f in dist/index.html dist/live.html dist/main.js dist/sw.js dist/pkg/editor/ibis_office_app_bg.wasm dist/pkg/seal/seal_crypto_bg.wasm; do
   [[ -f "$f" ]] || die "missing $f"
 done
 

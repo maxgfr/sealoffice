@@ -148,20 +148,44 @@ export function alert(title: string, text: string): Promise<void> {
 }
 
 /** Asks for one file from disk; null when the user cancels. */
-export function pickLocalFile(accept: string): Promise<File | null> {
+export async function pickLocalFile(accept: string): Promise<File | null> {
+  return (await pickLocalFiles(accept, false))[0] ?? null;
+}
+
+/** Asks for files from disk; empty when the user cancels. */
+export function pickLocalFiles(accept: string, multiple = true): Promise<File[]> {
   return new Promise((resolve) => {
-    const input = h('input', { type: 'file', accept, class: 'hidden' });
+    const input = h('input', { type: 'file', accept, class: 'hidden', multiple });
     input.addEventListener('change', () => {
-      resolve(input.files?.[0] ?? null);
+      resolve([...(input.files ?? [])]);
       input.remove();
     });
     input.addEventListener('cancel', () => {
-      resolve(null);
+      resolve([]);
       input.remove();
     });
     document.body.append(input);
     input.click();
   });
+}
+
+/** `text` for matching: lower case, accents removed ("Été" → "ete"). */
+export function searchKey(text: string): string {
+  return text.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+}
+
+/** A labelled <select>; `onChange` gets the chosen value. */
+export function select(
+  label: string,
+  options: [value: string, text: string][],
+  value: string,
+  onChange: (value: string) => void,
+): HTMLSelectElement {
+  const el = h('select', { 'aria-label': label });
+  el.append(...options.map(([v, t]) => h('option', { value: v }, t)));
+  el.value = value;
+  el.addEventListener('change', () => onChange(el.value));
+  return el;
 }
 
 export function errorMessage(error: unknown): string {

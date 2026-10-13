@@ -35,6 +35,11 @@ export function isDocumentName(name: string): boolean {
   return (DOCUMENT_EXTENSIONS as readonly string[]).includes(extension(name));
 }
 
+/** An imported document; `officePassword` is set when the file was Office-protected. */
+export interface ImportedFile extends NamedBytes {
+  officePassword?: string;
+}
+
 /** Asks the user for a secret; null means cancelled. */
 export type AskSecret = (request: { kind: 'office-password' | 'age-passphrase'; fileName: string }) => Promise<string | null>;
 
@@ -44,7 +49,7 @@ const SECRET_KEY_PREFIX = 'AGE-SECRET-KEY-1';
  * Decrypts `file` as needed and checks the editor can open it.
  * Resolves to null when the user cancels a prompt.
  */
-export async function importFile(file: NamedBytes, seal: SealCrypto, ask: AskSecret): Promise<NamedBytes | null> {
+export async function importFile(file: NamedBytes, seal: SealCrypto, ask: AskSecret): Promise<ImportedFile | null> {
   let { name, bytes } = file;
   if (detect(bytes, seal) === 'age') {
     const secret = await ask({ kind: 'age-passphrase', fileName: name });
@@ -58,7 +63,7 @@ export async function importFile(file: NamedBytes, seal: SealCrypto, ask: AskSec
   if (detect(bytes, seal) === 'office-encrypted') {
     const password = await ask({ kind: 'office-password', fileName: name });
     if (password === null) return null;
-    bytes = seal.office_decrypt(bytes, password);
+    return { name, bytes: seal.office_decrypt(bytes, password), officePassword: password };
   }
   return { name, bytes };
 }
