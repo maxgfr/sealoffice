@@ -8,70 +8,23 @@
 // browser contexts. Run with `bun run test:e2e` after `scripts/build.sh`.
 // SHOTS=<dir> saves screenshots; HEADED=1 shows the browser.
 // LIVE_RELAYS=local forces the in-process Nostr relay instead of the public ones.
-import { chromium, type BrowserContext, type Locator, type Page, type WebSocketRoute } from 'playwright';
+import type { BrowserContext, Page, WebSocketRoute } from 'playwright';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { RELAYS } from '../../src/live/transport';
+import {
+  Check, DIST, SHOTS, WORD, appbar, card, cardMenu, dialog, editorShown, goHome, hasWebGpu, home, launch, openCard, readClipboard,
+  serve, shot, typeInEditor, waitHome, wordText,
+} from './lib';
 
-const DIST = resolve(import.meta.dir, '../../../dist');
-const SHOTS = process.env.SHOTS ?? '';
 const PASSPHRASE = 'correct horse battery staple';
 const NEW_PASSPHRASE = 'recovered horse battery staple';
 const BACKUP_PASSPHRASE = 'backup horse battery staple';
 const EXPORT_PASSPHRASE = 'export horse battery staple';
 const DOC_PASSPHRASE = 'document horse staple';
 const AGE_HEADER = 'age-encryption.org/v1';
-const WORD = 'Document.docx';
 const EXCEL = 'Workbook.xlsx';
 const POWERPOINT = 'Presentation.pptx';
-
-const MIME: Record<string, string> = {
-  html: 'text/html; charset=utf-8',
-  js: 'text/javascript; charset=utf-8',
-  css: 'text/css; charset=utf-8',
-  json: 'application/json',
-  wasm: 'application/wasm',
-  md: 'text/markdown; charset=utf-8',
-  txt: 'text/plain; charset=utf-8',
-  png: 'image/png',
-  svg: 'image/svg+xml',
-  ttf: 'font/ttf',
-  otf: 'font/otf',
-  woff2: 'font/woff2',
-};
-
-function serve(): ReturnType<typeof Bun.serve> {
-  return Bun.serve({
-    port: 0,
-    hostname: '127.0.0.1',
-    async fetch(request) {
-      let path = decodeURIComponent(new URL(request.url).pathname);
-      if (path.endsWith('/')) path += 'index.html';
-      const file = resolve(DIST, `.${path}`);
-      if (!file.startsWith(DIST) || !existsSync(file)) return new Response('not found', { status: 404 });
-      const ext = file.split('.').pop() ?? '';
-      return new Response(Bun.file(file), {
-        headers: { 'Content-Type': MIME[ext] ?? 'application/octet-stream' },
-      });
-    },
-  });
-}
-
-class Check {
-  failures: string[] = [];
-  notes: string[] = [];
-  ok(cond: boolean, what: string): void {
-    (cond ? this.notes : this.failures).push(`${cond ? 'ok' : 'FAIL'} ${what}`);
-    console.log(`${cond ? 'ok  ' : 'FAIL'} ${what}`);
-  }
-}
-
-async function shot(page: Page, name: string): Promise<void> {
-  if (!SHOTS) return;
-  const path = join(SHOTS, `${name}.png`);
-  await page.screenshot({ path });
-  console.log(`  screenshot ${path}`);
-}
 
 /** Every file under the library's OPFS root: path → first bytes as text and SHA-256 of the content. */
 async function opfs(page: Page): Promise<Record<string, { head: string; hash: string }>> {
@@ -121,67 +74,6 @@ function nonAgeFiles(files: Record<string, { head: string }>): string[] {
   return Object.keys(files).filter((n) => n !== 'sealoffice/identity.key' && n !== 'sealoffice/passkey.json' && files[n]?.head !== AGE_HEADER);
 }
 
-const dialog = (page: Page): Locator => page.locator('dialog').last();
-
-/** The text of a .docx: word/document.xml without its tags. */
-function docxText(path: string): string {
-  const out = Bun.spawnSync(['unzip', '-p', path, 'word/document.xml']);
-  if (out.exitCode !== 0) throw new Error(`unzip failed: ${out.stderr.toString()}`);
-  return out.stdout.toString().replace(/<[^>]+>/g, '');
-}
-
-const home = (page: Page): Locator => page.locator('.home');
-const card = (page: Page, name: string): Locator => page.locator('.doc-card').filter({ has: page.getByRole('button', { name: `Open ${name}`, exact: true }) });
-const appbar = (page: Page): Locator => page.locator('nav.appbar');
-
-/** Home screen shown, editor downloaded. */
-async function waitHome(page: Page): Promise<void> {
-  await home(page).waitFor({ timeout: 60_000 });
-  await page.locator('.editor-status').waitFor({ state: 'detached', timeout: 180_000 });
-}
-
-/** Opens the ⋯ menu of `name`'s card and picks `items` (a submenu path). */
-async function cardMenu(page: Page, name: string, ...items: string[]): Promise<void> {
-  await page.getByRole('button', { name: `More actions for ${name}`, exact: true }).click();
-  for (const item of items) await page.getByRole('menuitem', { name: item, exact: true }).click();
-}
-
-/** Downloads `name` as its original file from the home screen and returns its path. */
-async function downloadOriginal(page: Page, name: string): Promise<string> {
-  const downloading = page.waitForEvent('download', { timeout: 30_000 });
-  await cardMenu(page, name, 'Download', 'Original');
-  return (await downloading).path();
-}
-
-/** The Word document's text, from the home screen. */
-async function wordText(page: Page, name = WORD): Promise<string> {
-  await card(page, name).waitFor({ timeout: 30_000 });
-  return docxText(await downloadOriginal(page, name));
-}
-
-/** Opens `name`'s card in the editor. */
-async function openCard(page: Page, name: string): Promise<void> {
-  await page.getByRole('button', { name: `Open ${name}`, exact: true }).click();
-  await editorShown(page);
-}
-
-async function editorShown(page: Page): Promise<void> {
-  await appbar(page).waitFor({ timeout: 60_000 });
-  await page.locator('body > canvas').waitFor({ state: 'visible', timeout: 60_000 });
-  await page.waitForTimeout(3000);
-}
-
-async function goHome(page: Page): Promise<void> {
-  await appbar(page).getByRole('button', { name: 'Home', exact: true }).click();
-  await home(page).waitFor({ timeout: 60_000 });
-}
-
-async function typeInEditor(page: Page, text: string): Promise<void> {
-  const box = await page.locator('body > canvas').boundingBox();
-  if (!box) throw new Error('editor canvas has no box');
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-  await page.keyboard.type(text, { delay: 30 });
-}
 
 /** Lock screen → home. */
 async function unlock(page: Page, passphrase: string): Promise<void> {
@@ -208,10 +100,6 @@ async function openSettings(page: Page): Promise<void> {
 
 async function closeSettings(page: Page): Promise<void> {
   await dialog(page).getByRole('button', { name: 'Done', exact: true }).click();
-}
-
-async function readClipboard(page: Page): Promise<string> {
-  return page.evaluate(() => navigator.clipboard.readText());
 }
 
 const normalizeWs = (url: string): string => url.replace(/\/+$/, '');
@@ -332,11 +220,7 @@ async function main(): Promise<number> {
   const origin = `http://localhost:${server.port}`;
   const check = new Check();
   const notProven: string[] = [];
-  const browser = await chromium.launch({
-    channel: 'chrome',
-    headless: process.env.HEADED !== '1',
-    args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan,WebGPU', '--use-angle=metal'],
-  });
+  const browser = await launch();
   const offOrigin: string[] = [];
   const offLive: string[] = [];
   const liveSockets = new Set<string>();
@@ -409,10 +293,7 @@ async function main(): Promise<number> {
     });
 
     await page.goto(`${origin}/`);
-    const gpu = await page.evaluate(async () => {
-      const g = (navigator as { gpu?: { requestAdapter(): Promise<unknown> } }).gpu;
-      return g ? (await g.requestAdapter()) != null : false;
-    });
+    const gpu = await hasWebGpu(page);
     check.ok(gpu, 'WebGPU adapter available');
     if (!gpu) {
       await shot(page, '00-no-webgpu');

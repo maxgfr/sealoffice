@@ -73,6 +73,8 @@ for patch in patches/*.patch; do
   fi
 done
 shopt -u nullglob
+# The bold and italic UI faces the patched web build embeds (IBM Plex Sans, OFL).
+cp fonts/IBMPlexSans-{Bold,Italic,BoldItalic}.ttf "$VENDOR/crates/ibis-office-app/fonts/"
 
 # --- editor wasm ------------------------------------------------------------
 echo "==> editor ($PROFILE)"

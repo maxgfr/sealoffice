@@ -8,7 +8,8 @@
     "build:crypto": "cd .. && cargo build -p seal-crypto --target wasm32-unknown-unknown --release && wasm-bindgen target/wasm32-unknown-unknown/release/seal_crypto.wasm --out-dir web/src/pkg/seal --target web",
     "typecheck": "tsc --noEmit -p .",
     "test": "bun test",
-    "test:e2e": "bun test/e2e/smoke.ts"
+    "test:e2e": "bun test/e2e/smoke.ts",
+    "test:e2e:word": "bun test/e2e/word.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

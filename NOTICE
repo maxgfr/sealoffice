@@ -13,5 +13,10 @@ vendor/ibis-office/NOTICE and applies to the ibisOffice code.
 The ibisOffice name and logo are trademarks of ibis inc. sealoffice is not
 affiliated with or endorsed by ibis inc.
 
+fonts/ holds the Bold, Italic and Bold Italic faces of IBM Plex Sans
+(version 3.005), Copyright 2017 IBM Corp. with Reserved Font Name "Plex",
+licensed under the SIL Open Font License 1.1 (fonts/OFL.txt). The build
+embeds them in the editor next to the Regular face ibisOffice ships.
+
 Third-party licenses of the editor's dependencies are listed in
 vendor/ibis-office/www/license.md (shipped as third-party-licenses.md).

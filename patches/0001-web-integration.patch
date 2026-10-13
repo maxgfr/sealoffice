@@ -70,11 +70,108 @@ index ee592e7..cd26f3c 100644
                  true
              }
              Err(_) => false,
+diff --git a/crates/ibis-office-app/src/docx/editing.rs b/crates/ibis-office-app/src/docx/editing.rs
+index 9c71155..f9a3494 100644
+--- a/crates/ibis-office-app/src/docx/editing.rs
++++ b/crates/ibis-office-app/src/docx/editing.rs
+@@ -155,9 +155,9 @@ actions!(
+ /// The keys of a document's text (Word's, with ⌘ on a Mac).
+ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
+     let c = Some(TEXT_CONTEXT);
+-    let m = |k: &str| if cfg!(target_os = "macos") { format!("cmd-{k}") } else { format!("ctrl-{k}") };
+-    let word = |k: &str| if cfg!(target_os = "macos") { format!("alt-{k}") } else { format!("ctrl-{k}") };
+-    vec![
++    let m = |k: &str| if crate::is_mac() { format!("cmd-{k}") } else { format!("ctrl-{k}") };
++    let word = |k: &str| if crate::is_mac() { format!("alt-{k}") } else { format!("ctrl-{k}") };
++    let mut bindings = vec![
+         KeyBinding::new("insert", ToggleOvertype, c),
+         KeyBinding::new("backspace", DeleteBackward, c),
+         KeyBinding::new("shift-backspace", DeleteBackward, c),
+@@ -198,10 +198,6 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
+         KeyBinding::new(&m("a"), SelectAll, c),
+         KeyBinding::new(&m("c"), Copy, c),
+         KeyBinding::new(&m("x"), Cut, c),
+-        KeyBinding::new(&m("v"), Paste, c),
+-        KeyBinding::new(&m("shift-v"), PastePlain, c),
+-        KeyBinding::new("alt-cmd-shift-v", PasteMatchFormat, c),
+-        KeyBinding::new("alt-ctrl-shift-v", PasteMatchFormat, c),
+         KeyBinding::new(&m("b"), ToggleBold, c),
+         KeyBinding::new(&m("i"), ToggleItalic, c),
+         KeyBinding::new(&m("u"), ToggleUnderline, c),
+@@ -254,8 +250,28 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
+         KeyBinding::new("ctrl-shift-f11", UnlockField, c),
+         KeyBinding::new("ctrl-shift-h", ToggleHidden, c),
+         KeyBinding::new(&m("shift-x"), ToggleHidden, c),
+-        KeyBinding::new(if cfg!(target_os = "macos") { "alt-cmd-s" } else { "alt-ctrl-s" }, ToggleSplit, c),
+-    ]
++        KeyBinding::new(if crate::is_mac() { "alt-cmd-s" } else { "alt-ctrl-s" }, ToggleSplit, c),
++    ];
++    // In the browser a key's action cannot read the clipboard: a paste reaches
++    // the document as the page's paste event, which only fires while ⌘V
++    // (Ctrl+V) is left unbound.
++    #[cfg(not(target_family = "wasm"))]
++    bindings.extend([
++        KeyBinding::new(&m("v"), Paste, c),
++        KeyBinding::new(&m("shift-v"), PastePlain, c),
++        KeyBinding::new("alt-cmd-shift-v", PasteMatchFormat, c),
++        KeyBinding::new("alt-ctrl-shift-v", PasteMatchFormat, c),
++    ]);
++    // There a shifted symbol also arrives as the character it types (⌘⇧= as
++    // ⌘⇧+ on a US layout), not as `shift-=`.
++    #[cfg(target_family = "wasm")]
++    bindings.extend([
++        KeyBinding::new(&m("shift-+"), ToggleSuperscript, c),
++        KeyBinding::new(&m("shift->"), GrowFont, c),
++        KeyBinding::new(&m("shift-<"), ShrinkFont, c),
++        KeyBinding::new(&m("shift-*"), ToggleFormattingMarks, c),
++    ]);
++    bindings
+ }
+ 
+ /// A line of text on a page, from the layout (points from the page's
+diff --git a/crates/ibis-office-app/src/docx/toolbar.rs b/crates/ibis-office-app/src/docx/toolbar.rs
+index 9c459b3..822e508 100644
+--- a/crates/ibis-office-app/src/docx/toolbar.rs
++++ b/crates/ibis-office-app/src/docx/toolbar.rs
+@@ -1547,7 +1547,7 @@ pub(crate) fn menus(_editor: &SlideEditor, menus: &mut Menus) {
+             sub.items.push(MenuItem::tr("docx.text.small-caps").checked(text_style.as_ref().is_some_and(|s| s.small_caps)).disabled(!editing)
+                 .on(|this, _, cx| this.toggle_small_caps(cx)).into());
+             sub.items.push(MenuItem::tr("docx.text.hidden").checked(text_style.as_ref().is_some_and(|s| s.hidden))
+-                .shortcut(if cfg!(target_os = "macos") { "⌘⇧X" } else { "Ctrl+Shift+H" })
++                .shortcut(if crate::is_mac() { "⌘⇧X" } else { "Ctrl+Shift+H" })
+                 .disabled(!editing)
+                 .on(|this, _, cx| this.toggle_hidden(cx)).into());
+             sub.items.push(MenuItem::tr("docx.text.outline").checked(text_style.as_ref().is_some_and(|s| s.outline)).disabled(!editing)
+@@ -2361,7 +2361,7 @@ pub(crate) fn menus(_editor: &SlideEditor, menus: &mut Menus) {
+     table_menu.push(MenuItem::tr("docx.table.to-text").disabled(!_editor.can_table_to_text()).on(|this,_,cx|this.table_to_text(cx)).into());
+     table_menu.push(MenuItem::tr("docx.table.from-text").disabled(!_editor.can_text_to_table()).on(|this,_,cx|this.text_to_table(cx)).into());
+     table_menu.push(MenuItem::tr("docx.cell.split-grid").disabled(!_editor.can_split_cell_grid()).on(|this,_,cx|this.split_cell_grid(cx)).into());
+-    table_menu.push(MenuItem::tr("docx.table.split").shortcut(if cfg!(target_os = "macos") { "⇧⌘↩" } else { "Ctrl+Shift+Enter" }).disabled(!_editor.can_split_table()).on(|this,_,cx|this.split_table(cx)).into());
++    table_menu.push(MenuItem::tr("docx.table.split").shortcut(if crate::is_mac() { "⇧⌘↩" } else { "Ctrl+Shift+Enter" }).disabled(!_editor.can_split_table()).on(|this,_,cx|this.split_table(cx)).into());
+     table_menu.push(
+         crate::shell::chrome::Submenu::tr(
+             "docx.table.sort",
 diff --git a/crates/ibis-office-app/src/lib.rs b/crates/ibis-office-app/src/lib.rs
-index 75be011..94dfbcc 100644
+index 75be011..58bf350 100644
 --- a/crates/ibis-office-app/src/lib.rs
 +++ b/crates/ibis-office-app/src/lib.rs
-@@ -919,11 +919,19 @@ mod web {
+@@ -908,7 +908,14 @@ mod web {
+ 
+     /// UI font bundled with the app. The browser has no system fonts GPUI can
+     /// load, and GPUI's `.SystemUIFont` alias resolves to IBM Plex Sans on web.
+-    const UI_FONT: &[u8] = include_bytes!("../fonts/IBMPlexSans-Regular.ttf");
++    /// Its bold and italic faces too: without them bold and italic text is drawn
++    /// with the regular face. sealoffice's build copies them into `fonts/`.
++    const UI_FONTS: [&[u8]; 4] = [
++        include_bytes!("../fonts/IBMPlexSans-Regular.ttf"),
++        include_bytes!("../fonts/IBMPlexSans-Bold.ttf"),
++        include_bytes!("../fonts/IBMPlexSans-Italic.ttf"),
++        include_bytes!("../fonts/IBMPlexSans-BoldItalic.ttf"),
++    ];
+ 
+     /// Start the editor in the page. Icons are fetched from
+     /// `<asset_base>/assets/icons/*.svg`. Pass an absolute URL such as
+@@ -919,11 +926,19 @@ mod web {
      /// cannot be read) the editor shows the start view.
      #[wasm_bindgen]
      pub fn run(asset_base: Option<String>, file_name: Option<String>, file: Option<Vec<u8>>) -> Result<(), JsValue> {
@@ -97,7 +194,12 @@ index 75be011..94dfbcc 100644
              }
          });
          gpui_kit::platform::web_init();
-@@ -957,7 +965,12 @@ mod web {
+@@ -953,11 +968,16 @@ mod web {
+ 
+         let handle = app.run_embedded(|cx| {
+             cx.text_system()
+-                .add_fonts(vec![Cow::Borrowed(UI_FONT)])
++                .add_fonts(UI_FONTS.iter().map(|font| Cow::Borrowed(*font)).collect())
                  .expect("failed to load the UI font");
              super::init(cx);
              Theme::global_mut(cx).font_family = "IBM Plex Sans".into();
@@ -111,7 +213,7 @@ index 75be011..94dfbcc 100644
          });
          APPLICATION.with(|app| *app.borrow_mut() = Some(handle));
          Ok(())
-@@ -983,6 +996,102 @@ mod web {
+@@ -983,6 +1003,102 @@ mod web {
          /// resolves to `{ name, bytes }`, or to `null` when cancelled.
          #[wasm_bindgen(catch, js_name = ibisOfficePickFile)]
          fn pick_file_js() -> Result<js_sys::Promise, JsValue>;
