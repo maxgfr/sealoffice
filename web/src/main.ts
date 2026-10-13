@@ -1,18 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// Boot: WebGPU check → lock screen → vault → full-screen editor.
+// Boot: WebGPU check → library (lock screen only when protected) → home screen
+// ⇄ editor screen. The editor starts once per page; Home hides its canvas.
 import { buildInfo, showAbout } from './about';
+import { AppBar } from './appbar';
 import { Bridge, focusEditor } from './bridge';
 import { loadCrypto, type SealCrypto } from './crypto';
-import { assetBase, loadEditor, type EditorModule } from './editor';
+import { DocActions, withExtension } from './docactions';
+import { assetBase, type BlankKind, loadEditor, type EditorModule } from './editor';
 import { Autosaver } from './autosave';
-import { lockNow, lockScreen, setSaveBeforeLock, startAutoLock, unloading } from './lock';
+import { Home, NEW_KINDS } from './home';
+import { extension } from './importer';
+import { lockNow, lockScreen, persistStorage, setSaveBeforeLock, startAutoLock, unloading } from './lock';
+import { protectDialog, settingsDialog } from './settings';
 import { OpfsStore } from './store';
 import { DiskLinks, diskLinksSupported, IdbHandleStore } from './diskfile';
 import { parseShare, type SharedLink } from './share';
 import { CHANNEL_NAME, TabGuard } from './tabguard';
-import { alert, button, errorMessage, h } from './ui';
-import { Vault } from './vault';
-import { savedThenRead, VaultView } from './vaultview';
+import { alert, button, closeMenus, errorMessage, h } from './ui';
+import { type DocEntry, Vault } from './vault';
+import { type OpenDoc, savedThenRead } from './vaultview';
 
 interface TrustedTypesFactory {
   createPolicy(name: string, rules: { createScriptURL: (url: string) => string }): unknown;
@@ -57,7 +63,7 @@ async function hasGraphics(): Promise<boolean> {
 
 const YIELDED_FLAG = 'sealoffice-yielded';
 
-/** Remembers, across the reload that follows, that this tab handed the vault to another one. */
+/** Remembers, across the reload that follows, that this tab handed the library to another one. */
 function markYielded(): void {
   try {
     sessionStorage.setItem(YIELDED_FLAG, '1');
@@ -77,7 +83,7 @@ function takeYielded(): boolean {
   }
 }
 
-/** Shown while another tab has the vault; resolves once this tab has taken it over. */
+/** Shown while another tab has the library; resolves once this tab has taken it over. */
 function otherTabScreen(root: HTMLElement, guard: TabGuard): Promise<void> {
   return new Promise((resolve) => {
     const error = h('p', { class: 'form-error', role: 'alert' });
@@ -93,8 +99,8 @@ function otherTabScreen(root: HTMLElement, guard: TabGuard): Promise<void> {
     root.replaceChildren(h(
       'main',
       { class: 'card lock' },
-      h('h1', {}, takeYielded() ? 'This vault is now open in another tab' : 'Open in another tab'),
-      h('p', { class: 'muted' }, 'sealoffice works in one tab at a time. Using it here saves and locks the other tab.'),
+      h('h1', {}, takeYielded() ? 'sealoffice is now open in another tab' : 'Open in another tab'),
+      h('p', { class: 'muted' }, 'sealoffice works in one tab at a time. Using it here saves and closes the other tab.'),
       error,
       h('div', { class: 'actions' }, use),
     ));
@@ -152,18 +158,21 @@ async function loadDiskLinks(vault: Vault, seal: SealCrypto): Promise<DiskLinks 
   return links;
 }
 
-/** Once the vault is open: offers to store the shared document. */
-async function receiveShare(view: VaultView, shared: { link: SharedLink | null; error: unknown }): Promise<void> {
+/** Once the library is open: offers to store the shared document. */
+async function receiveShare(actions: DocActions, shared: { link: SharedLink | null; error: unknown }): Promise<void> {
   try {
     if (shared.error) throw shared.error;
-    if (shared.link) await view.receiveShared(shared.link);
+    if (shared.link) await actions.receiveShared(shared.link);
   } catch (error) {
     console.error(error);
     await alert('Could not open the shared document', errorMessage(error));
   }
 }
 
-/** One active tab, then the lock screen in `root`: resolves once the vault is open. */
+/**
+ * One active tab, then the library: created unprotected on first launch,
+ * opened at once when unprotected, through the lock screen in `root` when protected.
+ */
 async function openVault(root: HTMLElement): Promise<{ vault: Vault; seal: SealCrypto }> {
   const guard = new TabGuard(navigator.locks, new BroadcastChannel(CHANNEL_NAME));
   if (!(await guard.acquire())) await otherTabScreen(root, guard);
@@ -174,7 +183,15 @@ async function openVault(root: HTMLElement): Promise<{ vault: Vault; seal: SealC
     markYielded();
     await lockNow(vault, false);
   });
-  await lockScreen(root, vault, seal);
+  const state = await vault.state();
+  if (state === 'none') {
+    await vault.createUnprotected();
+    await persistStorage().catch((error: unknown) => console.warn('persistent storage unavailable:', error));
+  } else if (state === 'open') {
+    await vault.openUnprotected();
+  } else {
+    await lockScreen(root, vault);
+  }
   startAutoLock(vault);
   return { vault, seal };
 }
@@ -194,95 +211,143 @@ async function boot(root: HTMLElement): Promise<void> {
   }
   const shared = takeShareLink();
   const { vault, seal } = await openVault(root);
-
-  if (!graphics) {
-    // Vault-only mode: the editor is never downloaded.
-    const view = new VaultView(vault, seal, () => Promise.reject(new Error('editing is unavailable in this browser')));
-    view.disableEditing();
-    const links = await loadDiskLinks(vault, seal);
-    if (links) view.attachDiskLinks(links);
-    await receiveShare(view, shared);
-    document.body.append(h(
-      'nav',
-      { class: 'pill', 'aria-label': 'sealoffice' },
-      button('Lock', () => void lockNow(vault)),
-      button('About', () => void showAbout()),
-    ));
-    await view.show({ choose: true, closable: false });
-    return;
-  }
-
-  const status = progressStatus();
-  const editorLoad: Promise<EditorModule> = loadEditor(status.update);
-  editorLoad.then(() => status.done(), (error: unknown) => status.done(error));
-  const view = new VaultView(vault, seal, () => editorLoad);
-  const bridge = new Bridge(vault, view);
-  bridge.install();
+  root.replaceChildren();
+  const actions = new DocActions(vault, seal);
   const links = await loadDiskLinks(vault, seal);
-  if (links) {
-    view.attachDiskLinks(links);
-    bridge.setAfterSave((id, bytes) => links.write(id, bytes));
-  }
-  await receiveShare(view, shared);
+  if (links) actions.attachDiskLinks(links);
+
+  const status = graphics ? progressStatus() : null;
+  const editorLoad: Promise<EditorModule> = graphics
+    ? loadEditor((fraction) => status?.update(fraction))
+    : Promise.reject(new Error('editing is unavailable in this browser'));
+  // The progress line reports a failed download; callers get the rejection too.
+  editorLoad.then(() => status?.done(), (error: unknown) => status?.done(error));
 
   let running: EditorModule | null = null;
-  /** Vault in choose mode: the picked document replaces the open one, once that one is saved. */
-  const switchDocument = async (editor: EditorModule): Promise<void> => {
-    const picked = await view.show({ choose: true, closable: true });
-    const doc = picked && (await savedThenRead(picked, () => view.saveOpenDoc('Open'), (id) => vault.read(id)));
-    if (doc) {
-      bridge.track(doc);
-      editor.open_bytes(doc.name, doc.bytes);
-    }
-    focusEditor();
+  let autosaver: Autosaver | null = null;
+  const bridge = new Bridge(vault, async () => {
+    // File > Open in the editor: the documents are on the home screen.
+    await goHome();
+    return null;
+  });
+  const changed = (): void => {
+    home.refresh();
+    appbar.refresh();
   };
-  const saveState = h('span', { class: 'muted small', role: 'status' });
-  const toolbar = h(
-    'nav',
-    { class: 'pill', 'aria-label': 'sealoffice' },
-    button('Vault', () => {
-      if (running) switchDocument(running).catch((error: unknown) => alert('Could not open the document', errorMessage(error)));
-    }),
-    button('Export', () => {
-      const exportOpen = async (): Promise<void> => {
-        // A never-saved document gets its vault id from this save.
-        if (!(await view.saveOpenDoc('Export'))) return;
-        const id = bridge.current;
-        if (!id) {
-          await alert('Nothing to export', 'Save the document to the vault first.');
-          return;
-        }
-        await view.exportDoc(id);
-      };
-      exportOpen().catch((error: unknown) => alert('Export failed', errorMessage(error)));
-    }),
-    button('Lock', () => void lockNow(vault)),
-    button('About', () => void showAbout()),
-    saveState,
-  );
-  document.body.append(toolbar);
-
-  const first = await view.show({ choose: true, closable: false, status: status.el });
-  if (!first) return;
-  const editor = await editorLoad;
-  bridge.track(first);
-  root.replaceChildren();
-  editor.run(assetBase(), first.name, first.bytes);
-  running = editor;
-  toolbar.classList.add('over-editor');
-  const autosaver = startAutosave(editor, bridge, saveState);
-  view.attachEditor({
-    autosaver,
-    currentId: () => bridge.current,
-    open: (doc) => {
-      bridge.track(doc);
-      editor.open_bytes(doc.name, doc.bytes);
+  actions.onRemoved(changed);
+  const home: Home = new Home(vault, actions, {
+    graphics,
+    create: (kind) => createDoc(kind),
+    open: (entry) => openEntry(entry),
+    settings: () => settingsDialog(vault, actions, { changed }),
+    about: showAbout,
+    lockLibrary: () => lockNow(vault),
+    protect: async () => {
+      if (await protectDialog(vault)) changed();
     },
   });
+  const appbar = new AppBar(vault, actions, {
+    home: () => goHome(),
+    current: () => {
+      const id = bridge.current;
+      return id === null ? undefined : vault.entry(id);
+    },
+    currentName: () => bridge.currentName,
+    rename: (entry, name) => renameOpen(entry, name),
+    lockLibrary: () => lockNow(vault),
+    about: showAbout,
+  });
+  if (status) home.showStatus(status.el);
+
+  /** Shows the editor's canvas and the app bar. */
+  const showEditor = (): void => {
+    closeMenus();
+    home.hide();
+    document.body.classList.remove('at-home');
+    appbar.show();
+    focusEditor();
+  };
+  /** Shows Home; the open document's card is marked with its save state. */
+  const showHome = (state = ''): void => {
+    closeMenus();
+    document.body.classList.add('at-home');
+    appbar.hide();
+    home.markOpen(bridge.current, state);
+    home.show();
+  };
+  /** Saves the open document, then shows Home; a locked document's key is forgotten. */
+  async function goHome(): Promise<void> {
+    // The editor may still call itself modified just after a save: the flush result decides.
+    const flushed = autosaver ? await autosaver.flush().then((r) => r === 'saved' || r === 'clean', () => false) : true;
+    if (!flushed && !(await actions.saveOpenDoc('Leave'))) return;
+    const id = bridge.current;
+    if (id !== null && vault.entry(id)?.lock) vault.forgetDocKeys();
+    showHome(autosaver ? (flushed ? 'Saved' : 'Not saved') : '');
+  }
+  /** Hands `doc` to the editor, starting it on the first document. */
+  async function openInEditor(doc: OpenDoc): Promise<void> {
+    const editor = await editorLoad;
+    bridge.track(doc);
+    if (running) {
+      editor.open_bytes(doc.name, doc.bytes);
+    } else {
+      editor.run(assetBase(), doc.name, doc.bytes);
+      running = editor;
+      autosaver = startAutosave(editor, bridge, appbar);
+      actions.attachEditor({
+        autosaver,
+        currentId: () => bridge.current,
+        editing: () => (document.body.classList.contains('at-home') ? null : bridge.current),
+        open: (opened) => {
+          bridge.track(opened);
+          editor.open_bytes(opened.name, opened.bytes);
+        },
+      });
+    }
+    showEditor();
+  }
+  async function openEntry(entry: DocEntry): Promise<void> {
+    // The key of a locked `entry` is kept only if it ends up on screen in the editor.
+    await actions.withDoc(entry, async () => {
+      // Saved first: when `entry` is the open document, its latest changes are read back.
+      const doc = await savedThenRead({ id: entry.id, name: entry.name, bytes: new Uint8Array() },
+        () => actions.saveOpenDoc('Open'), (id) => vault.read(id));
+      if (doc) await openInEditor(doc);
+    });
+  }
+  /** A blank document, stored in the library under a free name, then opened. */
+  async function createDoc(kind: BlankKind): Promise<void> {
+    const editor = await editorLoad;
+    if (!(await actions.saveOpenDoc('Create'))) return;
+    const base = NEW_KINDS.find((k) => k.kind === kind)?.name ?? `Document.${kind}`;
+    const bytes = editor.blank_file(kind);
+    const entry = await vault.write(vault.uniqueName(base), bytes);
+    await openInEditor({ id: entry.id, name: entry.name, bytes });
+  }
+  /** Renames the open document: saved first, then shown again under its new name (the editor saves by name). */
+  async function renameOpen(entry: DocEntry, name: string): Promise<void> {
+    if (!(await actions.saveOpenDoc('Rename'))) return;
+    const renamed = await vault.rename(entry.id, withExtension(name, extension(entry.name)) ?? entry.name);
+    const bytes = await vault.read(renamed.id);
+    await openInEditor({ id: renamed.id, name: renamed.name, bytes });
+  }
+
+  bridge.install();
+  if (links) bridge.setAfterSave((id, bytes) => links.write(id, bytes));
+  showHome();
+  await receiveShare(actions, shared);
+  home.refresh();
 }
 
-/** Autosave, saving before lock and on hide, the leave-page guard and the toolbar's save state. */
-function startAutosave(editor: EditorModule, bridge: Bridge, saveState: HTMLElement): Autosaver {
+/** The app bar's words for the open document's save state. */
+function saveStateText(autosaver: Autosaver, bridge: Bridge, failure: string | null): string {
+  if (failure) return 'Not saved';
+  if (bridge.saving) return 'Saving…';
+  return autosaver.dirty ? 'Unsaved changes' : 'Saved';
+}
+
+/** Autosave, saving before lock and on hide, the leave-page guard and the app bar's save state. */
+function startAutosave(editor: EditorModule, bridge: Bridge, appbar: AppBar): Autosaver {
   const autosaver = new Autosaver(editor, bridge.saved);
   let failure: string | null = null;
   const report = (error: unknown): void => {
@@ -291,10 +356,8 @@ function startAutosave(editor: EditorModule, bridge: Bridge, saveState: HTMLElem
     showState();
   };
   const showState = (): void => {
-    const dirty = autosaver.dirty;
-    if (!dirty) failure = null;
-    saveState.textContent = failure ? 'Not saved' : dirty ? 'Modified' : 'Saved';
-    saveState.title = failure ?? '';
+    if (!autosaver.dirty && !bridge.saving) failure = null;
+    appbar.showState(saveStateText(autosaver, bridge, failure), failure ?? '');
   };
   autosaver.start(report);
   setSaveBeforeLock(() => autosaver.flush());

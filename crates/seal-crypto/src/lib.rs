@@ -78,6 +78,12 @@ impl Identity {
         self.inner.to_public().to_string()
     }
 
+    /// The `AGE-SECRET-KEY-1…` string, for a key stored in the clear or shown
+    /// as a recovery key.
+    pub fn secret_key(&self) -> String {
+        self.inner.to_string().expose_secret().to_owned()
+    }
+
     /// The secret key as an age passphrase-encrypted file.
     pub fn wrap(&self, passphrase: &str) -> Result<Vec<u8>> {
         let key = self.inner.to_string();
@@ -236,6 +242,15 @@ mod tests {
         let back = Identity::from_secret_key(key.expose_secret()).unwrap();
         assert_eq!(back.recipient(), id.recipient());
         assert!(Identity::from_secret_key("AGE-SECRET-KEY-1NOPE").is_err());
+    }
+
+    #[test]
+    fn secret_key_export() {
+        let id = Identity::generate();
+        let key = id.secret_key();
+        assert!(key.starts_with("AGE-SECRET-KEY-1"));
+        let ct = id.encrypt(b"kept").unwrap();
+        assert_eq!(Identity::from_secret_key(&key).unwrap().decrypt(&ct).unwrap(), b"kept");
     }
 
     #[test]

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // live.html: the session bar, the editor and the input shield. The host opens
-// the vault and stores every snapshot; guests need no vault (memory only) and
-// may save a copy into theirs.
+// the library (unlocking it only when it is protected) and stores every
+// snapshot; guests need no library (memory only) and may save a copy into theirs.
 import { Autosaver, SaveSignal } from '../autosave';
 import type { SealCrypto } from '../crypto';
 import { assetBase, loadEditor, type EditorModule } from '../editor';
-import { alert, button, confirm, errorMessage, h } from '../ui';
+import { alert, button, confirm, errorMessage, form, h } from '../ui';
 import type { Vault } from '../vault';
 import { importSessionKey } from './protocol';
 import { LiveSession, type Snapshot } from './session';
@@ -16,14 +16,14 @@ const LIVE_AUTOSAVE_MS = 3000;
 
 export interface LiveDeps {
   graphics: boolean;
-  /** Tab guard and lock screen in `root`; resolves once the vault is open. */
+  /** Tab guard, then the lock screen in `root` if the library is protected; resolves once it is open. */
   openVault(root: HTMLElement): Promise<{ vault: Vault; seal: SealCrypto }>;
 }
 
 interface LiveLink {
   room: string;
   key: string;
-  /** Vault id of the document, on the host's page only (never in the invite link). */
+  /** Library id of the document, on the host's page only (never in the invite link). */
   hostDoc: string | null;
 }
 
@@ -47,7 +47,12 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
   if (link.hostDoc) {
     const { vault } = await deps.openVault(root);
     const entry = vault.entry(link.hostDoc);
-    if (!entry) throw new Error('the document of this session is no longer in the vault');
+    if (!entry) throw new Error('the document of this session is no longer in the library');
+    // A locked document's key never survives the page change: ask for it again.
+    if (entry.lock && !vault.isDocOpen(entry.id) && !(await askDocPassphrase(vault, entry.id, entry.name))) {
+      location.assign(new URL('./', location.href).href);
+      return;
+    }
     host = { vault, id: entry.id, name: entry.name };
     initial = { name: entry.name, bytes: await vault.read(entry.id) };
   }
@@ -104,7 +109,7 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
   if (initial) session.setInitial(initial);
   bar.showPen(session.holdsPen, 'The host');
 
-  // Saves: the pen holder's go to every peer (and the host's vault); nobody else saves.
+  // Saves: the pen holder's go to every peer (and the host's library); nobody else saves.
   window.ibisOfficeSaveFile = async (name, bytes) => {
     try {
       if (!session.holdsPen) throw new Error('only the participant holding the pen can save');
@@ -138,6 +143,8 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
   const [first, loaded] = await Promise.all([firstSnapshot, editorLoad]);
   editor = loaded;
   root.replaceChildren();
+  // No app bar here: the canvas takes the whole window, the session bar floats over it.
+  document.documentElement.style.setProperty('--appbar', '0px');
   editor.run(assetBase(), first.name, first.bytes);
   session.attachEditor(editor);
   autosaver = new Autosaver(editor, signal);
@@ -149,7 +156,7 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
   });
 }
 
-/** Guests: stores the current snapshot in their own vault (unlocking it first). */
+/** Guests: stores the current snapshot in their own library (unlocking it first if it is protected). */
 async function saveCopy(snapshot: Snapshot | null, deps: LiveDeps): Promise<void> {
   if (!snapshot) throw new Error('no document received yet');
   const overlay = h('div', { class: 'overlay' });
@@ -162,15 +169,30 @@ async function saveCopy(snapshot: Snapshot | null, deps: LiveDeps): Promise<void
     const { vault } = await deps.openVault(panel);
     const entry = await vault.write(vault.uniqueName(snapshot.name), snapshot.bytes);
     await vault.close();
-    await alert('Copy saved', `"${entry.name}" is in your vault.`);
+    await alert('Copy saved', `"${entry.name}" is in your library.`);
   } finally {
     overlay.remove();
   }
 }
 
+/** Asks for a locked document's passphrase; false when the host gave up. */
+async function askDocPassphrase(vault: Vault, id: string, name: string): Promise<boolean> {
+  const values = await form({
+    title: `Open "${name}"`,
+    text: 'This document is locked with its own passphrase.',
+    fields: [{ name: 'secret', label: 'Document passphrase', type: 'password', autocomplete: 'off' }],
+    submit: 'Unlock',
+    validate: async (v) => {
+      await vault.openDoc(id, v.secret ?? '');
+      return null;
+    },
+  });
+  return values !== null;
+}
+
 const SHIELD_Z = 15;
 
-/** UI the shield never blocks: the session bar, dialogs and overlays (the vault's lock screen). */
+/** UI the shield never blocks: the session bar, dialogs and overlays (the library's lock screen). */
 const APP_UI = '.live-bar, dialog, .overlay';
 
 /** Whether a key pressed with focus on `target` would reach the editor (canvas, body, nothing). */
@@ -231,7 +253,7 @@ class LiveBar {
       this.requestButton,
       isHost ? this.takeButton : null,
       this.pendingButton,
-      isHost ? null : button('Save a copy in my vault', () => this.onSaveCopy()),
+      isHost ? null : button('Save a copy in my library', () => this.onSaveCopy()),
       button('Leave', () => this.onLeave()),
       this.status,
     );

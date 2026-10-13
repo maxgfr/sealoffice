@@ -33,12 +33,14 @@ let dialogCount = 0;
 
 /**
  * Shows a modal dialog built by `build`; `close(value)` settles it.
- * Escape and the browser's cancel resolve to `cancelValue`.
+ * Escape and the browser's cancel resolve to `cancelValue`, unless
+ * `dismissible` is false (the dialog then closes only through `close`).
  */
 export function modal<T>(
   title: string,
   build: (close: (value: T) => void, body: HTMLElement) => void,
   cancelValue: T,
+  dismissible = true,
 ): Promise<T> {
   return new Promise((resolve) => {
     const titleId = `dialog-title-${++dialogCount}`;
@@ -54,7 +56,7 @@ export function modal<T>(
     };
     dialog.addEventListener('cancel', (event) => {
       event.preventDefault();
-      close(cancelValue);
+      if (dismissible) close(cancelValue);
     });
     build(close, body);
     document.body.append(dialog);
@@ -80,6 +82,12 @@ export function form(options: {
   fields: Field[];
   submit: string;
   danger?: boolean;
+  /** A checkbox that must be ticked before the form can be submitted. */
+  acknowledge?: string;
+  /** Keeps the submit button disabled until it returns true for the typed values. */
+  ready?: (values: Record<string, string>) => boolean;
+  /** Extra controls under the buttons; `close` cancels the form first. */
+  aside?: (close: () => void) => HTMLElement;
   validate?: (values: Record<string, string>) => string | null | Promise<string | null>;
 }): Promise<Record<string, string> | null> {
   return modal<Record<string, string> | null>(options.title, (close, body) => {
@@ -98,32 +106,53 @@ export function form(options: {
       return { field, input, row: h('label', { class: 'field', for: id }, h('span', {}, field.label), input) };
     });
     const submit = h('button', { type: 'submit', class: options.danger ? 'danger' : 'primary' }, options.submit);
+    const values = (): Record<string, string> => Object.fromEntries(inputs.map(({ field, input }) => [field.name, input.value]));
+    let ack: HTMLLabelElement | null = null;
+    const blocked = (): boolean =>
+      (ack !== null && !ack.querySelector('input')?.checked) || (options.ready !== undefined && !options.ready(values()));
+    if (options.acknowledge) {
+      const id = `field-${dialogCount}-acknowledge`;
+      const box = h('input', { id, type: 'checkbox', name: 'acknowledge' });
+      box.addEventListener('change', () => {
+        submit.disabled = blocked();
+      });
+      ack = h('label', { class: 'field', for: id }, box, h('span', {}, options.acknowledge));
+    }
+    for (const { input } of inputs) {
+      input.addEventListener('input', () => {
+        submit.disabled = blocked();
+      });
+    }
+    submit.disabled = blocked();
     const el = h(
       'form',
       { class: 'form', novalidate: true },
       options.text ? h('p', {}, options.text) : null,
       ...inputs.map((i) => i.row),
+      ack,
       error,
       h('div', { class: 'actions' }, button('Cancel', () => close(null)), submit),
+      options.aside?.(() => close(null)) ?? null,
     );
     el.addEventListener('submit', (event) => {
       event.preventDefault();
-      const values = Object.fromEntries(inputs.map(({ field, input }) => [field.name, input.value]));
+      if (blocked()) return;
+      const typed = values();
       submit.disabled = true;
       error.textContent = '';
-      Promise.resolve(options.validate?.(values) ?? null)
+      Promise.resolve(options.validate?.(typed) ?? null)
         .then((message) => {
           if (message) {
             error.textContent = message;
           } else {
-            close(values);
+            close(typed);
           }
         })
         .catch((e: unknown) => {
           error.textContent = errorMessage(e);
         })
         .finally(() => {
-          submit.disabled = false;
+          submit.disabled = blocked();
         });
     });
     body.append(el);
@@ -200,4 +229,161 @@ export function formatSize(bytes: number): string {
 
 export function formatDate(ms: number): string {
   return new Date(ms).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+/** "just now", "5 min ago", "yesterday", or the date for older times. */
+export function formatRelative(ms: number, now = Date.now()): string {
+  const minutes = Math.round((now - ms) / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.round(hours / 24);
+  if (days === 1) return 'yesterday';
+  if (days < 7) return `${days} days ago`;
+  return new Date(ms).toLocaleDateString(undefined, { dateStyle: 'medium' });
+}
+
+/** One entry of a menu: an action, or a submenu with `items`. Null entries are skipped. */
+export interface MenuItem {
+  label: string;
+  action?: () => void;
+  items?: (MenuItem | null)[];
+  danger?: boolean;
+  disabled?: boolean;
+}
+
+/** The menus open right now, outermost first. */
+const openMenus: { el: HTMLElement; anchor: HTMLElement }[] = [];
+
+function closeMenusFrom(depth: number, refocus: boolean): void {
+  const closing = openMenus.splice(depth);
+  for (const menu of closing.reverse()) {
+    menu.el.remove();
+    menu.anchor.setAttribute('aria-expanded', 'false');
+  }
+  if (refocus) closing[closing.length - 1]?.anchor.focus();
+}
+
+/** Closes every open menu. */
+export function closeMenus(): void {
+  closeMenusFrom(0, false);
+}
+
+let menuListeners = false;
+
+/** Outside clicks and resizes close the menus; installed with the first menu. */
+function listenForMenuDismissal(): void {
+  if (menuListeners) return;
+  menuListeners = true;
+  document.addEventListener('pointerdown', (event) => {
+    if (openMenus.length === 0) return;
+    const target = event.target instanceof Node ? event.target : null;
+    if (target && openMenus.some((m) => m.el.contains(target) || m.anchor.contains(target))) return;
+    closeMenus();
+  }, { capture: true });
+  window.addEventListener('resize', () => closeMenus());
+}
+
+/**
+ * Opens a menu of `items` next to `anchor` (below it, or to its right for a
+ * submenu). Arrow keys move, Enter/Space activate, Escape closes, → opens a
+ * submenu and ← closes it.
+ */
+function openMenu(anchor: HTMLElement, items: (MenuItem | null)[], depth: number, label: string): void {
+  listenForMenuDismissal();
+  closeMenusFrom(depth, false);
+  const el = h('div', { class: 'menu', role: 'menu', 'aria-label': label });
+  const buttons: HTMLButtonElement[] = [];
+  for (const item of items) {
+    if (!item) continue;
+    const submenu = item.items;
+    const entry = h('button', {
+      type: 'button',
+      role: 'menuitem',
+      tabindex: '-1',
+      class: item.danger ? 'danger-link' : '',
+      'aria-haspopup': submenu ? 'menu' : false,
+      'aria-expanded': submenu ? 'false' : false,
+    }, h('span', {}, item.label), submenu ? h('span', { class: 'menu-arrow', 'aria-hidden': 'true' }, '▸') : null);
+    entry.disabled = item.disabled === true;
+    const activate = (): void => {
+      if (submenu) {
+        openMenu(entry, submenu, depth + 1, item.label);
+        return;
+      }
+      closeMenus();
+      item.action?.();
+    };
+    entry.addEventListener('click', activate);
+    entry.addEventListener('keydown', (event) => {
+      if (submenu && event.key === 'ArrowRight') {
+        event.preventDefault();
+        activate();
+      }
+    });
+    buttons.push(entry);
+    el.append(entry);
+  }
+  el.addEventListener('keydown', (event) => {
+    const enabled = buttons.filter((b) => !b.disabled);
+    const index = enabled.indexOf(document.activeElement as HTMLButtonElement);
+    const move = (to: number): void => {
+      event.preventDefault();
+      enabled[(to + enabled.length) % enabled.length]?.focus();
+    };
+    if (event.key === 'ArrowDown') move(index + 1);
+    else if (event.key === 'ArrowUp') move(index - 1);
+    else if (event.key === 'Home') move(0);
+    else if (event.key === 'End') move(enabled.length - 1);
+    else if (event.key === 'Escape' || (event.key === 'ArrowLeft' && depth > 0)) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenusFrom(depth, true);
+    } else if (event.key === 'Tab') {
+      closeMenus();
+    }
+  });
+  document.body.append(el);
+  openMenus.push({ el, anchor });
+  anchor.setAttribute('aria-expanded', 'true');
+  // Fixed position next to the anchor, kept inside the viewport.
+  const rect = anchor.getBoundingClientRect();
+  const width = el.offsetWidth;
+  const height = el.offsetHeight;
+  let left = depth > 0 ? rect.right + 2 : rect.right - width;
+  let top = depth > 0 ? rect.top - 4 : rect.bottom + 4;
+  if (depth > 0 && left + width > window.innerWidth - 8) left = rect.left - width - 2;
+  left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
+  if (top + height > window.innerHeight - 8) top = Math.max(8, (depth > 0 ? rect.bottom : rect.top - 4) - height);
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+  buttons.find((b) => !b.disabled)?.focus();
+}
+
+/** A button opening a keyboard-accessible menu; `items` is called on each open. */
+export function menuButton(
+  content: Child | Child[],
+  label: string,
+  items: () => (MenuItem | null)[],
+  className = '',
+): HTMLButtonElement {
+  const el = h('button', { type: 'button', class: className, 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-label': label },
+    ...(Array.isArray(content) ? content : [content]));
+  const open = (): void => {
+    const already = openMenus.findIndex((m) => m.anchor === el);
+    if (already >= 0) {
+      closeMenusFrom(already, false);
+      return;
+    }
+    openMenu(el, items(), 0, label);
+  };
+  el.addEventListener('click', open);
+  el.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      if (!openMenus.some((m) => m.anchor === el)) open();
+    }
+  });
+  return el;
 }

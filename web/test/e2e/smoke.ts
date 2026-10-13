@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// End-to-end smoke test against the built dist/: create a vault, write and save a
-// document, lock, unlock and reopen it; then autosave, the other-tab screen,
-// the recovery key, backup/restore, share links, passkeys, history and a live
-// session between two browser contexts. Run with `bun run test:e2e` after
-// `scripts/build.sh`. SHOTS=<dir> saves screenshots; HEADED=1 shows the browser.
+// End-to-end smoke test against the built dist/: first launch on the home screen
+// without a passphrase, a Word document typed and saved without ⌘S, Excel and
+// PowerPoint, reload, an encrypted .age download imported back, a document lock,
+// protecting the library (recovery key, lock screen, passkey, forgotten
+// passphrase, removing protection); then the other-tab screen, backup/restore
+// with a locked document, share links, history and a live session between two
+// browser contexts. Run with `bun run test:e2e` after `scripts/build.sh`.
+// SHOTS=<dir> saves screenshots; HEADED=1 shows the browser.
 // LIVE_RELAYS=local forces the in-process Nostr relay instead of the public ones.
 import { chromium, type BrowserContext, type Locator, type Page, type WebSocketRoute } from 'playwright';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -15,8 +18,12 @@ const SHOTS = process.env.SHOTS ?? '';
 const PASSPHRASE = 'correct horse battery staple';
 const NEW_PASSPHRASE = 'recovered horse battery staple';
 const BACKUP_PASSPHRASE = 'backup horse battery staple';
-const GUEST_PASSPHRASE = 'guest horse battery staple';
+const EXPORT_PASSPHRASE = 'export horse battery staple';
+const DOC_PASSPHRASE = 'document horse staple';
 const AGE_HEADER = 'age-encryption.org/v1';
+const WORD = 'Document.docx';
+const EXCEL = 'Workbook.xlsx';
+const POWERPOINT = 'Presentation.pptx';
 
 const MIME: Record<string, string> = {
   html: 'text/html; charset=utf-8',
@@ -66,7 +73,7 @@ async function shot(page: Page, name: string): Promise<void> {
   console.log(`  screenshot ${path}`);
 }
 
-/** Every file under the vault's OPFS root: path → first bytes as text and SHA-256 of the content. */
+/** Every file under the library's OPFS root: path → first bytes as text and SHA-256 of the content. */
 async function opfs(page: Page): Promise<Record<string, { head: string; hash: string }>> {
   return page.evaluate(async () => {
     const out: Record<string, { head: string; hash: string }> = {};
@@ -75,7 +82,16 @@ async function opfs(page: Page): Promise<Record<string, { head: string; hash: st
         if (handle.kind === 'directory') {
           await walk(handle as FileSystemDirectoryHandle, `${prefix}${name}/`);
         } else {
-          const bytes = new Uint8Array(await (await (handle as FileSystemFileHandle).getFile()).arrayBuffer());
+          let file: File;
+          try {
+            file = await (handle as FileSystemFileHandle).getFile();
+          } catch (e) {
+            // The app may be saving: an entry listed by the iterator (a createWritable swap file,
+            // a blob being replaced) can vanish before getFile(). It is simply no longer there.
+            if (e instanceof DOMException && e.name === 'NotFoundError') continue;
+            throw e;
+          }
+          const bytes = new Uint8Array(await file.arrayBuffer());
           const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
           out[`${prefix}${name}`] = {
             head: new TextDecoder().decode(bytes.slice(0, 21)),
@@ -89,16 +105,6 @@ async function opfs(page: Page): Promise<Record<string, { head: string; hash: st
   });
 }
 
-async function typeAndSave(page: Page, text: string): Promise<void> {
-  const canvas = page.locator('body > canvas');
-  const box = await canvas.boundingBox();
-  if (!box) throw new Error('editor canvas has no box');
-  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-  await page.keyboard.type(text, { delay: 30 });
-  await page.waitForTimeout(500);
-  await page.keyboard.press('Meta+S');
-}
-
 async function waitForDocs(page: Page, predicate: (files: Record<string, { hash: string }>) => boolean): Promise<boolean> {
   for (let i = 0; i < 40; i++) {
     if (predicate(await opfs(page))) return true;
@@ -110,6 +116,11 @@ async function waitForDocs(page: Page, predicate: (files: Record<string, { hash:
 const docFiles = (files: Record<string, { hash: string }>): [string, string][] =>
   Object.entries(files).filter(([k]) => k.startsWith('sealoffice/docs/')).map(([k, v]) => [k, v.hash]);
 
+/** OPFS files that are not age files, besides the unprotected library's plain key. */
+function nonAgeFiles(files: Record<string, { head: string }>): string[] {
+  return Object.keys(files).filter((n) => n !== 'sealoffice/identity.key' && n !== 'sealoffice/passkey.json' && files[n]?.head !== AGE_HEADER);
+}
+
 const dialog = (page: Page): Locator => page.locator('dialog').last();
 
 /** The text of a .docx: word/document.xml without its tags. */
@@ -119,55 +130,50 @@ function docxText(path: string): string {
   return out.stdout.toString().replace(/<[^>]+>/g, '');
 }
 
-/** Exports the first vault document unencrypted (the vault overlay is shown) and returns its text. */
-async function exportText(page: Page): Promise<string> {
-  const row = page.locator('.doc-list .doc').first();
-  await row.waitFor({ timeout: 30_000 });
-  await row.getByRole('button', { name: 'Export', exact: true }).click();
-  await dialog(page).getByRole('button', { name: 'Unencrypted file…' }).click();
-  const downloading = page.waitForEvent('download', { timeout: 30_000 });
-  await dialog(page).getByRole('button', { name: 'Export unencrypted' }).click();
-  const file = await downloading;
-  const path = await file.path();
-  return docxText(path);
-}
+const home = (page: Page): Locator => page.locator('.home');
+const card = (page: Page, name: string): Locator => page.locator('.doc-card').filter({ has: page.getByRole('button', { name: `Open ${name}`, exact: true }) });
+const appbar = (page: Page): Locator => page.locator('nav.appbar');
 
-/** Lock screen of an existing vault → vault list → the first document in the editor. */
-async function unlockAndOpen(page: Page, passphrase: string): Promise<void> {
-  await page.fill('#passphrase', passphrase);
-  await page.getByRole('button', { name: 'Unlock', exact: true }).click();
-  await waitVaultAndOpen(page);
-}
-
-async function waitVaultAndOpen(page: Page): Promise<void> {
-  await page.getByRole('heading', { name: 'Vault' }).waitFor({ timeout: 60_000 });
+/** Home screen shown, editor downloaded. */
+async function waitHome(page: Page): Promise<void> {
+  await home(page).waitFor({ timeout: 60_000 });
   await page.locator('.editor-status').waitFor({ state: 'detached', timeout: 180_000 });
-  await page.locator('.doc-list .doc-name').first().click();
-  await page.locator('body > canvas').waitFor({ timeout: 60_000 });
+}
+
+/** Opens the ⋯ menu of `name`'s card and picks `items` (a submenu path). */
+async function cardMenu(page: Page, name: string, ...items: string[]): Promise<void> {
+  await page.getByRole('button', { name: `More actions for ${name}`, exact: true }).click();
+  for (const item of items) await page.getByRole('menuitem', { name: item, exact: true }).click();
+}
+
+/** Downloads `name` as its original file from the home screen and returns its path. */
+async function downloadOriginal(page: Page, name: string): Promise<string> {
+  const downloading = page.waitForEvent('download', { timeout: 30_000 });
+  await cardMenu(page, name, 'Download', 'Original');
+  return (await downloading).path();
+}
+
+/** The Word document's text, from the home screen. */
+async function wordText(page: Page, name = WORD): Promise<string> {
+  await card(page, name).waitFor({ timeout: 30_000 });
+  return docxText(await downloadOriginal(page, name));
+}
+
+/** Opens `name`'s card in the editor. */
+async function openCard(page: Page, name: string): Promise<void> {
+  await page.getByRole('button', { name: `Open ${name}`, exact: true }).click();
+  await editorShown(page);
+}
+
+async function editorShown(page: Page): Promise<void> {
+  await appbar(page).waitFor({ timeout: 60_000 });
+  await page.locator('body > canvas').waitFor({ state: 'visible', timeout: 60_000 });
   await page.waitForTimeout(3000);
 }
 
-/** Creation screen → recovery key screen (its key is returned) → vault. */
-async function createVault(page: Page, passphrase: string): Promise<string> {
-  await page.locator('#passphrase-repeat').waitFor({ timeout: 60_000 });
-  await page.fill('#passphrase', passphrase);
-  await page.fill('#passphrase-repeat', passphrase);
-  await page.getByRole('button', { name: 'Create vault' }).click();
-  return storeRecoveryKey(page);
-}
-
-async function storeRecoveryKey(page: Page): Promise<string> {
-  await page.getByRole('heading', { name: 'Recovery key' }).waitFor({ timeout: 60_000 });
-  const key = (await page.locator('pre.recovery-key').innerText()).trim();
-  const next = page.getByRole('button', { name: 'Continue' });
-  const disabledBefore = await next.isDisabled();
-  await page.locator('#recovery-stored').check();
-  await next.click();
-  return disabledBefore ? key : `(Continue was enabled before ticking) ${key}`;
-}
-
-async function readClipboard(page: Page): Promise<string> {
-  return page.evaluate(() => navigator.clipboard.readText());
+async function goHome(page: Page): Promise<void> {
+  await appbar(page).getByRole('button', { name: 'Home', exact: true }).click();
+  await home(page).waitFor({ timeout: 60_000 });
 }
 
 async function typeInEditor(page: Page, text: string): Promise<void> {
@@ -175,6 +181,37 @@ async function typeInEditor(page: Page, text: string): Promise<void> {
   if (!box) throw new Error('editor canvas has no box');
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
   await page.keyboard.type(text, { delay: 30 });
+}
+
+/** Lock screen → home. */
+async function unlock(page: Page, passphrase: string): Promise<void> {
+  await page.fill('#passphrase', passphrase);
+  await page.getByRole('button', { name: 'Unlock', exact: true }).click();
+  await waitHome(page);
+}
+
+/** The recovery key dialog: its key, Continue only enabled once "stored" is ticked. */
+async function storeRecoveryKey(page: Page): Promise<string> {
+  await dialog(page).getByRole('heading', { name: 'Recovery key' }).waitFor({ timeout: 60_000 });
+  const key = (await dialog(page).locator('pre.recovery-key').innerText()).trim();
+  const next = dialog(page).getByRole('button', { name: 'Continue' });
+  const disabledBefore = await next.isDisabled();
+  await page.locator('#recovery-stored').check();
+  await next.click();
+  return disabledBefore ? key : `(Continue was enabled before ticking) ${key}`;
+}
+
+async function openSettings(page: Page): Promise<void> {
+  await page.locator('.home-bar').getByRole('button', { name: 'Settings', exact: true }).click();
+  await dialog(page).getByRole('heading', { name: 'Settings' }).waitFor({ timeout: 10_000 });
+}
+
+async function closeSettings(page: Page): Promise<void> {
+  await dialog(page).getByRole('button', { name: 'Done', exact: true }).click();
+}
+
+async function readClipboard(page: Page): Promise<string> {
+  return page.evaluate(() => navigator.clipboard.readText());
 }
 
 const normalizeWs = (url: string): string => url.replace(/\/+$/, '');
@@ -382,196 +419,315 @@ async function main(): Promise<number> {
       return 1;
     }
 
-    // Create the vault; the recovery key is shown before the vault opens.
-    await page.locator('#passphrase-repeat').waitFor();
-    await shot(page, '01-create-vault');
-    const recoveryKey = await createVault(page, PASSPHRASE);
-    check.ok(/^AGE-SECRET-KEY-1[0-9A-Z]+$/.test(recoveryKey), `recovery key is shown at creation, Continue only once stored (${recoveryKey.slice(0, 20)}…)`);
-    await page.getByRole('heading', { name: 'Vault' }).waitFor({ timeout: 60_000 });
-    await page.locator('.editor-status').waitFor({ state: 'detached', timeout: 180_000 });
-    await shot(page, '02-vault-empty');
+    // 1. First launch: the home screen, no passphrase, three tiles.
+    await waitHome(page);
+    check.ok(!(await page.locator('#passphrase').isVisible()), 'first launch opens on the home screen without a passphrase');
+    const tiles = ['Word document', 'Excel workbook', 'PowerPoint presentation'];
+    const tilesShown = await Promise.all(tiles.map((name) => page.getByRole('button', { name, exact: true }).isEnabled()));
+    check.ok(tilesShown.every(Boolean), 'home shows the three create tiles');
+    check.ok(await page.getByText('Not protected').isVisible(), 'home footer says the library is not protected');
+    await shot(page, '01-home-empty');
+    const firstFiles = await opfs(page);
+    check.ok(firstFiles['sealoffice/identity.key'] !== undefined && firstFiles['sealoffice/identity.age'] === undefined,
+      `an unprotected library keeps its key in identity.key (${Object.keys(firstFiles).join(', ')})`);
 
-    // New Word document.
-    await page.getByRole('button', { name: 'New document' }).click();
-    await page.locator('body > canvas').waitFor({ timeout: 60_000 });
-    await page.waitForTimeout(3000);
-    await shot(page, '03-editor-new');
+    // A Word document typed without ⌘S: Home saves it, the card says so, reopening shows it.
+    await page.getByRole('button', { name: 'Word document', exact: true }).click();
+    await editorShown(page);
+    await shot(page, '02-editor-new');
     check.ok(pageErrors.length === 0, `no uncaught errors after opening the editor (${pageErrors.join('; ')})`);
-    check.ok(await page.locator('nav.pill.over-editor').isVisible(), 'toolbar pill is shown over the editor');
-
-    // First save creates the document.
-    await typeAndSave(page, 'Hello sealoffice');
-    check.ok(await waitForDocs(page, (f) => docFiles(f).length === 1), 'first save writes one document blob');
+    check.ok((await appbar(page).locator('.appbar-name').innerText()) === WORD, 'the app bar names the new document');
+    const canvasBox = await page.locator('body > canvas').boundingBox();
+    check.ok(canvasBox !== null && Math.round(canvasBox.y) === 48, `the canvas starts below the 48 px app bar (${canvasBox?.y})`);
+    await typeInEditor(page, 'Hello sealoffice');
+    const saveState = appbar(page).locator('[role=status]');
+    await saveState.filter({ hasText: 'Unsaved changes' }).waitFor({ timeout: 10_000 }).catch(() => undefined);
+    check.ok((await saveState.innerText()) === 'Unsaved changes', `app bar shows Unsaved changes after typing (${await saveState.innerText()})`);
+    await goHome(page);
+    const wordCard = card(page, WORD);
+    await wordCard.waitFor({ timeout: 30_000 });
+    const openBadge = (await wordCard.locator('.badge-pill.open').innerText().catch(() => '')).trim();
+    check.ok(openBadge === 'Open · Saved', `back home, the open document's card says Saved (${openBadge})`);
+    await shot(page, '03-home-card');
+    const typed = await wordText(page);
+    check.ok(typed.includes('Hello sealoffice'), `text typed without ⌘S is saved by Home (${typed})`);
+    await openCard(page, WORD);
+    check.ok((await saveState.innerText()) === 'Saved', `app bar shows Saved after reopening (${await saveState.innerText()})`);
+    // ⌘S still saves, and the earlier save is kept as a version.
+    const beforeSave = docFiles(await opfs(page)).length;
+    await typeInEditor(page, ' again');
     await page.waitForTimeout(500);
-    await shot(page, '04-editor-saved');
-    const firstHash = docFiles(await opfs(page))[0]?.[1];
+    await page.keyboard.press('Meta+S');
+    check.ok(await waitForDocs(page, (f) => docFiles(f).length === beforeSave + 1), '⌘S writes a new blob and keeps the previous one as a version');
 
-    // Second save changes it.
-    await typeAndSave(page, ' again');
-    // The previous blob stays as a version (history), so the save adds a second blob.
-    check.ok(await waitForDocs(page, (f) => docFiles(f).length === 2 && docFiles(f).some(([, hash]) => hash === firstHash)
-      && docFiles(f).some(([, hash]) => hash !== firstHash)),
-      'second save writes a new document blob and keeps the first as a version');
-
-    const files = await opfs(page);
-    const names = Object.keys(files);
-    check.ok(names.includes('sealoffice/identity.age') && names.includes('sealoffice/index.age'), `vault files present (${names.join(', ')})`);
-    const plain = names.filter((n) => files[n]?.head !== AGE_HEADER);
-    check.ok(plain.length === 0, `every OPFS file is an age file (${plain.join(', ') || 'all'})`);
-
-    // The vault list shows the saved document.
-    await page.locator('nav.pill').getByRole('button', { name: 'Vault' }).click();
-    const row = page.locator('.doc-list .doc');
-    await row.first().waitFor();
-    check.ok((await row.count()) === 1, 'vault list shows one document');
-    check.ok(/modified/.test(await row.first().innerText()), 'vault row shows a modified time');
-    await shot(page, '05-vault-list');
-    await page.getByRole('button', { name: 'Close' }).click();
-
-    // About.
-    await page.locator('nav.pill').getByRole('button', { name: 'About' }).click();
+    // About from the ⋯ menu.
+    await appbar(page).getByRole('button', { name: 'More actions', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'About', exact: true }).click();
     const powered = page.getByRole('link', { name: 'ibisOffice' });
     await powered.waitFor({ timeout: 10_000 }).catch(() => undefined);
     check.ok(await powered.isVisible(), 'About shows the "Powered by ibisOffice" link');
-    await shot(page, '06-about');
     await page.locator('dialog').getByRole('button', { name: 'Close' }).click();
 
-    // Autosave: type without ⌘S; the toolbar says Modified, and Lock saves first.
-    await typeInEditor(page, ' autosaved');
-    const saveState = page.locator('nav.pill [role=status]');
-    await saveState.filter({ hasText: 'Modified' }).waitFor({ timeout: 10_000 }).catch(() => undefined);
-    check.ok((await saveState.innerText()) === 'Modified', `toolbar shows Modified after typing (${await saveState.innerText()})`);
+    // 2. Excel and PowerPoint open in the same editor.
+    for (const [tile, name] of [['Excel workbook', EXCEL], ['PowerPoint presentation', POWERPOINT]] as const) {
+      await goHome(page);
+      await page.getByRole('button', { name: tile, exact: true }).click();
+      await editorShown(page);
+      check.ok((await appbar(page).locator('.appbar-name').innerText()) === name, `${tile} opens as ${name}`);
+    }
+    await shot(page, '04-editor-pptx');
+    await goHome(page);
+    check.ok((await page.locator('.doc-card').count()) === 3, 'home shows three documents');
+    check.ok(pageErrors.length === 0, `no uncaught errors after the three kinds (${pageErrors.join('; ')})`);
 
-    // Lock, unlock, reopen.
-    await page.locator('nav.pill').getByRole('button', { name: 'Lock' }).click();
-    await page.getByRole('button', { name: 'Unlock' }).waitFor({ timeout: 30_000 });
-    await shot(page, '07-locked');
-    await page.fill('#passphrase', 'wrong passphrase!');
-    await page.getByRole('button', { name: 'Unlock' }).click();
-    await page.locator('.form-error').filter({ hasText: /./ }).waitFor({ timeout: 60_000 });
-    check.ok(true, `wrong passphrase is refused (${await page.locator('.form-error').innerText()})`);
-    await page.fill('#passphrase', PASSPHRASE);
-    await page.getByRole('button', { name: 'Unlock' }).click();
-    await page.getByRole('heading', { name: 'Vault' }).waitFor({ timeout: 60_000 });
-    await page.locator('.editor-status').waitFor({ state: 'detached', timeout: 180_000 });
-    await page.locator('.doc-list .doc-name').first().click();
-    await page.locator('body > canvas').waitFor({ timeout: 60_000 });
-    await page.waitForTimeout(3000);
-    await shot(page, '08-reopened');
-    check.ok(pageErrors.length === 0, `no uncaught errors after reopening (${pageErrors.join('; ')})`);
-    check.ok((await saveState.innerText()) === 'Saved', `toolbar shows Saved after reopening (${await saveState.innerText()})`);
-    await page.locator('nav.pill').getByRole('button', { name: 'Vault' }).click();
-    const afterLock = await exportText(page);
-    check.ok(afterLock.includes('Hello sealoffice again autosaved'), `text typed without ⌘S is saved by Lock (${afterLock})`);
-    await page.locator('.vault-header').getByRole('button', { name: 'Close' }).click();
+    // 3. Reload: no passphrase, the documents are there.
+    await page.reload();
+    await waitHome(page);
+    check.ok(!(await page.locator('#passphrase').isVisible()) && (await page.locator('.doc-card').count()) === 3,
+      'after a reload the documents are there without a passphrase');
+    const files = await opfs(page);
+    const plain = nonAgeFiles(files);
+    check.ok(plain.length === 0, `every other OPFS file is an age file (${plain.join(', ') || 'all'})`);
 
-    // A second tab of the same browser: "open in another tab", then Use here.
+    // A second tab of the same browser: "Open in another tab", then Use here.
     const other = await context.newPage();
     watch(other);
     await other.goto(`${origin}/`);
     await other.getByRole('heading', { name: 'Open in another tab' }).waitFor({ timeout: 30_000 });
     check.ok(true, 'a second tab shows "Open in another tab"');
-    await shot(other, '09-other-tab');
+    await shot(other, '05-other-tab');
     await other.getByRole('button', { name: 'Use here' }).click();
-    await other.getByRole('button', { name: 'Unlock', exact: true }).waitFor({ timeout: 60_000 });
-    await page.getByRole('heading', { name: 'This vault is now open in another tab' }).waitFor({ timeout: 60_000 });
-    check.ok(true, 'Use here moves the vault: the second tab gets the lock screen, the first says it is open elsewhere');
+    await home(other).waitFor({ timeout: 60_000 });
+    await page.getByRole('heading', { name: 'sealoffice is now open in another tab' }).waitFor({ timeout: 60_000 });
+    check.ok(true, 'Use here moves the library: the second tab gets the home screen, the first says it is open elsewhere');
     await page.getByRole('button', { name: 'Use here' }).click();
-    await page.getByRole('button', { name: 'Unlock', exact: true }).waitFor({ timeout: 60_000 });
-    await other.getByRole('heading', { name: 'This vault is now open in another tab' }).waitFor({ timeout: 60_000 });
-    check.ok(true, 'Use here in the first tab takes the vault back');
+    await waitHome(page);
+    await other.getByRole('heading', { name: 'sealoffice is now open in another tab' }).waitFor({ timeout: 60_000 });
+    check.ok(true, 'Use here in the first tab takes the library back');
     await other.close();
 
-    // Forgotten passphrase: the recovery key resets it and the document opens.
+    // 4. Download an encrypted .age, then import it back with its passphrase.
+    const ageDownload = page.waitForEvent('download', { timeout: 30_000 });
+    await cardMenu(page, WORD, 'Download', 'Encrypted .age');
+    await dialog(page).getByLabel('Export passphrase', { exact: true }).fill(EXPORT_PASSPHRASE);
+    await dialog(page).getByLabel('Repeat passphrase', { exact: true }).fill(EXPORT_PASSPHRASE);
+    await dialog(page).getByRole('button', { name: 'Download', exact: true }).click();
+    const ageFile = await ageDownload;
+    const agePath = join(await ageFile.path(), '..', ageFile.suggestedFilename());
+    await ageFile.saveAs(agePath);
+    check.ok(readFileSync(agePath).subarray(0, AGE_HEADER.length).toString() === AGE_HEADER && ageFile.suggestedFilename().endsWith('.age'),
+      `encrypted download is an age file (${ageFile.suggestedFilename()})`);
+    const importing = page.waitForEvent('filechooser');
+    await page.locator('.home-bar').getByRole('button', { name: 'Import', exact: true }).click();
+    await (await importing).setFiles(agePath);
+    await dialog(page).getByLabel('Passphrase or secret key', { exact: true }).fill(EXPORT_PASSPHRASE);
+    await dialog(page).getByRole('button', { name: 'Decrypt' }).click();
+    const reimported = 'Document (2).docx';
+    await card(page, reimported).waitFor({ timeout: 30_000 }).catch(() => undefined);
+    const reimportedText = (await card(page, reimported).count()) === 1 ? await wordText(page, reimported) : '';
+    check.ok(reimportedText.includes('Hello sealoffice again'), `the .age download imports back with its passphrase (${reimportedText})`);
+    await cardMenu(page, reimported, 'Delete…');
+    await dialog(page).getByRole('button', { name: 'Delete', exact: true }).click();
+    await card(page, reimported).waitFor({ state: 'detached', timeout: 10_000 });
+
+    // 5. Document lock: lock the Word document, reload, wrong then right passphrase, remove the lock.
+    await cardMenu(page, WORD, 'Lock…');
+    await dialog(page).getByLabel('Document passphrase', { exact: true }).fill(DOC_PASSPHRASE);
+    await dialog(page).getByLabel('Repeat document passphrase', { exact: true }).fill(DOC_PASSPHRASE);
+    const lockButton = dialog(page).getByRole('button', { name: 'Lock', exact: true });
+    const lockDisabled = await lockButton.isDisabled();
+    await dialog(page).getByRole('checkbox').check();
+    await lockButton.click();
+    await dialog(page).waitFor({ state: 'detached', timeout: 60_000 }).catch(() => undefined);
+    check.ok(lockDisabled, 'locking a document needs the no-recovery box ticked');
+    check.ok(await wordCard.getByText('Locked').isVisible(), 'the locked document shows a lock badge');
+    // Locked from Home: its key is not kept, so opening it asks for the passphrase without a reload.
+    await page.getByRole('button', { name: `Open ${WORD}`, exact: true }).click();
+    const askedAtOnce = await dialog(page).getByLabel('Document passphrase', { exact: true })
+      .waitFor({ timeout: 10_000 }).then(() => true, () => false);
+    check.ok(askedAtOnce, 'a document locked from Home asks for its passphrase before a reload');
+    if (askedAtOnce) {
+      await dialog(page).getByRole('button', { name: 'Cancel', exact: true }).click();
+      await dialog(page).waitFor({ state: 'detached', timeout: 10_000 }).catch(() => undefined);
+    }
+    await page.reload();
+    await waitHome(page);
+    await page.getByRole('button', { name: `Open ${WORD}`, exact: true }).click();
+    await dialog(page).getByLabel('Document passphrase', { exact: true }).fill('not the passphrase');
+    await dialog(page).getByRole('button', { name: 'Unlock', exact: true }).click();
+    await dialog(page).locator('.form-error').filter({ hasText: /./ }).waitFor({ timeout: 60_000 }).catch(() => undefined);
+    const docError = await dialog(page).locator('.form-error').innerText().catch(() => '');
+    check.ok(docError !== '', `a wrong document passphrase is refused (${docError})`);
+    await dialog(page).getByLabel('Document passphrase', { exact: true }).fill(DOC_PASSPHRASE);
+    await dialog(page).getByRole('button', { name: 'Unlock', exact: true }).click();
+    await editorShown(page);
+    check.ok(true, 'the right document passphrase opens the locked document');
+    await shot(page, '06-locked-open');
+    await goHome(page);
+    await cardMenu(page, WORD, 'Remove lock…');
+    await dialog(page).getByLabel('Document passphrase', { exact: true }).fill(DOC_PASSPHRASE);
+    await dialog(page).getByRole('button', { name: 'Remove lock', exact: true }).click();
+    await dialog(page).waitFor({ state: 'detached', timeout: 60_000 }).catch(() => undefined);
+    check.ok((await wordCard.getByText('Locked').count()) === 0, 'Remove lock takes the badge off');
+
+    // 6. Protect the library: recovery key, lock screen after a reload.
+    await openSettings(page);
+    await dialog(page).getByRole('button', { name: 'Protect with a passphrase…' }).click();
+    await dialog(page).getByLabel('Passphrase', { exact: true }).fill(PASSPHRASE);
+    await dialog(page).getByLabel('Repeat passphrase', { exact: true }).fill(PASSPHRASE);
+    await dialog(page).getByRole('button', { name: 'Protect', exact: true }).click();
+    const recoveryKey = await storeRecoveryKey(page);
+    check.ok(/^AGE-SECRET-KEY-1[0-9A-Z]+$/.test(recoveryKey), `protecting shows the recovery key, Continue only once stored (${recoveryKey.slice(0, 20)}…)`);
+    // A passkey, while the library is protected.
+    const addPasskey = dialog(page).getByRole('button', { name: 'Add passkey…' });
+    await addPasskey.waitFor({ timeout: 10_000 }).catch(() => undefined);
+    const passkeyOffered = await addPasskey.isVisible();
+    check.ok(passkeyOffered, 'Settings offers "Add passkey…" with a PRF authenticator');
+    if (passkeyOffered) {
+      await addPasskey.click();
+      await dialog(page).getByRole('heading', { name: 'Passkey added' }).waitFor({ timeout: 60_000 });
+      await dialog(page).getByRole('button', { name: 'OK' }).click();
+    }
+    await closeSettings(page);
+    check.ok(await page.locator('.home-footer').getByText('Protected', { exact: true }).isVisible(), 'home footer says Protected');
+    const protectedFiles = await opfs(page);
+    check.ok(protectedFiles['sealoffice/identity.key'] === undefined && protectedFiles['sealoffice/identity.age'] !== undefined,
+      `a protected library has no plain key left (${Object.keys(protectedFiles).filter((n) => n.includes('identity')).join(', ')})`);
+    const protectedPlain = nonAgeFiles(protectedFiles);
+    check.ok(protectedPlain.length === 0, `every OPFS file of the protected library is an age file (${protectedPlain.join(', ') || 'all'})`);
+
+    // Autosave before locking: type without ⌘S, then Lock library in the app bar.
+    await openCard(page, WORD);
+    await typeInEditor(page, ' autosaved');
+    await appbar(page).getByRole('button', { name: 'Lock library', exact: true }).click();
+    await page.getByRole('button', { name: 'Unlock', exact: true }).waitFor({ timeout: 30_000 });
+    await shot(page, '07-locked');
+    await page.fill('#passphrase', 'wrong passphrase!');
+    await page.getByRole('button', { name: 'Unlock', exact: true }).click();
+    await page.locator('.form-error').filter({ hasText: /./ }).waitFor({ timeout: 60_000 });
+    check.ok(true, `wrong passphrase is refused (${await page.locator('.form-error').innerText()})`);
+    await unlock(page, PASSPHRASE);
+    const afterLock = await wordText(page);
+    check.ok(afterLock.includes('Hello sealoffice again autosaved'), `text typed without ⌘S is saved by Lock library (${afterLock})`);
+
+    // Passkey unlock.
+    if (passkeyOffered) {
+      await page.locator('.home-footer').getByRole('button', { name: 'Lock now' }).click();
+      const withPasskey = page.getByRole('button', { name: 'Unlock with a passkey' });
+      await withPasskey.waitFor({ timeout: 60_000 });
+      await withPasskey.click();
+      await waitHome(page);
+      await shot(page, '08-passkey');
+      check.ok(true, 'the library unlocks with the passkey');
+    }
+
+    // Forgotten passphrase: the recovery key resets it.
+    await page.reload();
     await page.getByRole('button', { name: 'Forgot passphrase? Use the recovery key' }).click();
     await dialog(page).getByLabel('Recovery key', { exact: true }).fill(recoveryKey);
     await dialog(page).getByLabel('New passphrase', { exact: true }).fill(NEW_PASSPHRASE);
     await dialog(page).getByLabel('Repeat new passphrase', { exact: true }).fill(NEW_PASSPHRASE);
     await dialog(page).getByRole('button', { name: 'Reset passphrase' }).click();
-    await waitVaultAndOpen(page);
-    await shot(page, '10-recovered');
-    check.ok(pageErrors.length === 0, `the recovery key resets the passphrase and the document opens (${pageErrors.join('; ')})`);
+    await waitHome(page);
+    await shot(page, '09-recovered');
+    check.ok((await page.locator('.doc-card').count()) === 3, 'the recovery key resets the passphrase and the documents are there');
 
-    // Back up the vault and make a share link.
-    await page.locator('nav.pill').getByRole('button', { name: 'Vault' }).click();
-    await page.getByRole('button', { name: 'Back up vault…' }).click();
+    // Remove protection: back to opening without a passphrase.
+    await openSettings(page);
+    await dialog(page).getByRole('button', { name: 'Remove protection…' }).click();
+    await dialog(page).getByLabel('Passphrase', { exact: true }).fill(NEW_PASSPHRASE);
+    await dialog(page).getByRole('checkbox').check();
+    await dialog(page).getByRole('button', { name: 'Remove protection', exact: true }).click();
+    await dialog(page).getByRole('heading', { name: 'Settings' }).waitFor({ timeout: 60_000 });
+    await closeSettings(page);
+    await page.reload();
+    await waitHome(page);
+    check.ok(!(await page.locator('#passphrase').isVisible()) && (await page.locator('.doc-card').count()) === 3,
+      'after Remove protection the library opens without a passphrase');
+
+    // 7. Backup with a locked document, restored into a fresh browser.
+    await cardMenu(page, EXCEL, 'Lock…');
+    await dialog(page).getByLabel('Document passphrase', { exact: true }).fill(DOC_PASSPHRASE);
+    await dialog(page).getByLabel('Repeat document passphrase', { exact: true }).fill(DOC_PASSPHRASE);
+    await dialog(page).getByRole('checkbox').check();
+    await dialog(page).getByRole('button', { name: 'Lock', exact: true }).click();
+    await dialog(page).waitFor({ state: 'detached', timeout: 60_000 }).catch(() => undefined);
+    await openSettings(page);
+    await dialog(page).getByRole('button', { name: 'Back up library…' }).click();
     await dialog(page).getByLabel('Backup passphrase', { exact: true }).fill(BACKUP_PASSPHRASE);
     await dialog(page).getByLabel('Repeat backup passphrase', { exact: true }).fill(BACKUP_PASSPHRASE);
     const backingUp = page.waitForEvent('download', { timeout: 60_000 });
-    await dialog(page).getByRole('button', { name: 'Back up' }).click();
+    await dialog(page).getByRole('button', { name: 'Back up', exact: true }).click();
     const backup = await backingUp;
     const backupPath = join(await backup.path(), '..', backup.suggestedFilename());
     await backup.saveAs(backupPath);
     check.ok(readFileSync(backupPath).subarray(0, AGE_HEADER.length).toString() === AGE_HEADER, `backup is an age file (${backup.suggestedFilename()})`);
+    await closeSettings(page);
 
-    await page.locator('.doc-list .doc').first().getByRole('button', { name: 'Share…' }).click();
+    const restoredContext = await newContext();
+    const restored = await restoredContext.newPage();
+    watch(restored);
+    await restored.goto(`${origin}/`);
+    await waitHome(restored);
+    const choosing = restored.waitForEvent('filechooser');
+    await restored.getByRole('button', { name: 'Restore a backup…' }).click();
+    await (await choosing).setFiles(backupPath);
+    await dialog(restored).getByLabel('Backup passphrase', { exact: true }).fill(BACKUP_PASSPHRASE);
+    await dialog(restored).getByRole('button', { name: 'Restore', exact: true }).click();
+    await dialog(restored).getByRole('heading', { name: 'Backup restored' }).waitFor({ timeout: 60_000 });
+    await dialog(restored).getByRole('button', { name: 'OK' }).click();
+    await shot(restored, '10-restored');
+    const restoredText = await wordText(restored);
+    check.ok(restoredText.includes('Hello sealoffice again autosaved'), `backup restored in a fresh browser holds the document (${restoredText})`);
+    check.ok(await card(restored, EXCEL).getByText('Locked').isVisible(), 'the locked document is still locked after the restore');
+    await restored.getByRole('button', { name: `Open ${EXCEL}`, exact: true }).click();
+    await dialog(restored).getByLabel('Document passphrase', { exact: true }).fill(DOC_PASSPHRASE);
+    await dialog(restored).getByRole('button', { name: 'Unlock', exact: true }).click();
+    await editorShown(restored);
+    check.ok(true, 'the restored locked document opens with its own passphrase');
+    // Lost document passphrase, on this throwaway copy: the prompt offers to delete the document.
+    await restored.reload();
+    await waitHome(restored);
+    await restored.getByRole('button', { name: `Open ${EXCEL}`, exact: true }).click();
+    await dialog(restored).getByLabel('Document passphrase', { exact: true }).fill('not the passphrase');
+    await dialog(restored).getByRole('button', { name: 'Unlock', exact: true }).click();
+    await dialog(restored).locator('.form-error').filter({ hasText: /./ }).waitFor({ timeout: 60_000 }).catch(() => undefined);
+    const forgotDoc = dialog(restored).getByRole('button', { name: 'Forgot it? Delete this document', exact: true });
+    check.ok(await forgotDoc.isVisible(), 'a wrong document passphrase prompt offers "Forgot it? Delete this document"');
+    await forgotDoc.click();
+    const forgetButton = dialog(restored).getByRole('button', { name: 'Delete', exact: true });
+    await forgetButton.waitFor({ timeout: 10_000 });
+    const forgetDisabled = await forgetButton.isDisabled();
+    await dialog(restored).getByRole('checkbox').check();
+    await forgetButton.click();
+    const forgotten = await card(restored, EXCEL).waitFor({ state: 'detached', timeout: 10_000 }).then(() => true, () => false);
+    check.ok(forgetDisabled && forgotten, 'deleting a locked document with a lost passphrase needs the box ticked and removes its card');
+    await restoredContext.close();
+
+    // Share link, opened in another fresh browser: the document is imported.
+    await cardMenu(page, WORD, 'Share link…');
     await dialog(page).getByRole('button', { name: 'Link with the key included' }).click();
     await dialog(page).getByRole('button', { name: 'Copy link' }).click();
     await dialog(page).getByText('Copied.').waitFor({ timeout: 10_000 });
     const shareLink = await readClipboard(page);
     check.ok(shareLink.startsWith(`${origin}/#`), `share link points at this app (${shareLink.slice(0, 60)}…)`);
     await dialog(page).getByRole('button', { name: 'Close' }).click();
-    await page.locator('.vault-header').getByRole('button', { name: 'Close' }).click();
-
-    // Restore the backup into a fresh browser.
-    const restoredContext = await newContext();
-    const restored = await restoredContext.newPage();
-    watch(restored);
-    await restored.goto(`${origin}/`);
-    await restored.locator('#passphrase-repeat').waitFor({ timeout: 60_000 });
-    const choosing = restored.waitForEvent('filechooser');
-    await restored.getByRole('button', { name: 'Restore a backup…' }).click();
-    await (await choosing).setFiles(backupPath);
-    await dialog(restored).getByLabel('Backup passphrase', { exact: true }).fill(BACKUP_PASSPHRASE);
-    await dialog(restored).getByLabel('New vault passphrase', { exact: true }).fill(PASSPHRASE);
-    await dialog(restored).getByLabel('Repeat vault passphrase', { exact: true }).fill(PASSPHRASE);
-    await dialog(restored).getByRole('button', { name: 'Restore' }).click();
-    await storeRecoveryKey(restored);
-    await restored.getByRole('heading', { name: 'Vault' }).waitFor({ timeout: 60_000 });
-    await shot(restored, '11-restored');
-    const restoredText = await exportText(restored);
-    check.ok(restoredText.includes('Hello sealoffice again autosaved'), `backup restored in a fresh browser holds the document (${restoredText})`);
-    await restoredContext.close();
-
-    // Open the share link in another fresh browser: the document is imported.
     const sharedContext = await newContext();
     const shared = await sharedContext.newPage();
     watch(shared);
     await shared.goto(shareLink);
-    await createVault(shared, PASSPHRASE);
     await shared.getByRole('heading', { name: 'Shared document' }).waitFor({ timeout: 60_000 });
     await dialog(shared).getByRole('button', { name: 'Save' }).click();
     await dialog(shared).getByRole('heading', { name: 'Saved' }).waitFor({ timeout: 30_000 });
     await dialog(shared).getByRole('button', { name: 'OK' }).click();
-    await shared.getByRole('heading', { name: 'Vault' }).waitFor({ timeout: 60_000 });
-    await shot(shared, '12-shared');
-    const sharedText = await exportText(shared);
+    await waitHome(shared);
+    await shot(shared, '11-shared');
+    const sharedText = await wordText(shared);
     check.ok(sharedText.includes('Hello sealoffice again autosaved'), `share link imports the document in another browser (${sharedText})`);
     await sharedContext.close();
 
-    // Passkey: add one, lock, unlock with it.
-    await page.locator('nav.pill').getByRole('button', { name: 'Vault' }).click();
-    const addPasskey = page.getByRole('button', { name: 'Add passkey…' });
-    await addPasskey.waitFor({ timeout: 10_000 }).catch(() => undefined);
-    check.ok(await addPasskey.isVisible(), 'vault offers "Add passkey…" with a PRF authenticator');
-    if (await addPasskey.isVisible()) {
-      await addPasskey.click();
-      await dialog(page).getByRole('heading', { name: 'Passkey added' }).waitFor({ timeout: 60_000 });
-      await dialog(page).getByRole('button', { name: 'OK' }).click();
-      await page.locator('.vault-header').getByRole('button', { name: 'Close' }).click();
-      await page.locator('nav.pill').getByRole('button', { name: 'Lock' }).click();
-      const withPasskey = page.getByRole('button', { name: 'Unlock with a passkey' });
-      await withPasskey.waitFor({ timeout: 60_000 });
-      await withPasskey.click();
-      await waitVaultAndOpen(page);
-      await shot(page, '13-passkey');
-      check.ok(true, 'the vault unlocks with the passkey');
-      await page.locator('nav.pill').getByRole('button', { name: 'Vault' }).click();
-    }
-
-    // History: restore the first version.
-    const docRow = page.locator('.doc-list .doc').first();
-    await docRow.getByRole('button', { name: 'History' }).click();
+    // History: restore the oldest version (the blank document).
+    await cardMenu(page, WORD, 'Version history');
     const versions = dialog(page).getByRole('button', { name: 'Restore' });
     await versions.first().waitFor({ timeout: 10_000 });
     check.ok((await versions.count()) >= 2, `history lists the earlier versions (${await versions.count()})`);
@@ -579,8 +735,8 @@ async function main(): Promise<number> {
     await dialog(page).getByRole('heading', { name: 'Restore this version?' }).waitFor({ timeout: 30_000 });
     await dialog(page).getByRole('button', { name: 'Restore' }).click();
     await dialog(page).waitFor({ state: 'detached', timeout: 30_000 });
-    const historyText = await exportText(page);
-    check.ok(historyText.includes('Hello sealoffice') && !historyText.includes('again'), `restoring version 1 brings back the first save (${historyText})`);
+    const historyText = await wordText(page);
+    check.ok(!historyText.includes('again'), `restoring the oldest version brings back the first save (${historyText})`);
 
     // Live session: host on live.html, a guest in another browser receives the snapshot.
     const forceLocal = process.env.LIVE_RELAYS === 'local';
@@ -602,14 +758,13 @@ async function main(): Promise<number> {
     let guestContext: BrowserContext | null = null;
     try {
       if (!reachable) await routeRelays(context);
-      await docRow.getByRole('button', { name: 'Live session…' }).click();
+      await cardMenu(page, WORD, 'Live session…');
       await dialog(page).getByRole('button', { name: 'Start' }).click();
       await page.waitForURL(/\/live\.html#r=.+&k=.+&h=.+/, { timeout: 30_000 });
-      await page.getByRole('button', { name: 'Unlock', exact: true }).waitFor({ timeout: 60_000 });
-      await page.fill('#passphrase', NEW_PASSPHRASE);
-      await page.getByRole('button', { name: 'Unlock', exact: true }).click();
+      // The library is not protected: the host goes straight to the session.
       const hostBar = page.locator('nav.live-bar');
       await hostBar.waitFor({ timeout: 120_000 });
+      check.ok(!(await page.locator('#passphrase').isVisible()), 'the host of an unprotected library is not asked to unlock it');
       await hostBar.getByRole('button', { name: 'Copy invite link' }).click();
       await hostBar.getByText('Invite link copied.').waitFor({ timeout: 10_000 });
       const invite = await readClipboard(page);
@@ -623,25 +778,19 @@ async function main(): Promise<number> {
       const guestBar = guest.locator('nav.live-bar');
       await guestBar.waitFor({ timeout: 120_000 });
       check.ok(await guestBar.getByRole('button', { name: 'Request the pen' }).isVisible(), 'guest receives the host snapshot and shows the session bar');
-      await shot(guest, '14-live-guest');
+      await shot(guest, '12-live-guest');
 
-      await typeInEditor(page, ' live');
+      await typeInEditor(page, 'Hello sealoffice live');
       // The pen holder's autosave sends a snapshot every 3 s.
       await page.waitForTimeout(10_000);
-      await guestBar.getByRole('button', { name: 'Save a copy in my vault' }).click();
-      await guest.locator('#passphrase-repeat').waitFor({ timeout: 60_000 });
-      await guest.fill('#passphrase', GUEST_PASSPHRASE);
-      await guest.fill('#passphrase-repeat', GUEST_PASSPHRASE);
-      await guest.getByRole('button', { name: 'Create vault' }).click();
-      await storeRecoveryKey(guest);
+      await guestBar.getByRole('button', { name: 'Save a copy in my library' }).click();
       await dialog(guest).getByRole('heading', { name: 'Copy saved' }).waitFor({ timeout: 60_000 });
       await dialog(guest).getByRole('button', { name: 'OK' }).click();
+      check.ok(true, 'a guest saves a copy into a new, unprotected library without a passphrase');
       await guestBar.getByRole('button', { name: 'Leave' }).click();
       await guest.waitForURL(`${origin}/`, { timeout: 30_000 });
-      await guest.fill('#passphrase', GUEST_PASSPHRASE);
-      await guest.getByRole('button', { name: 'Unlock', exact: true }).click();
-      await guest.getByRole('heading', { name: 'Vault' }).waitFor({ timeout: 60_000 });
-      const liveText = await exportText(guest);
+      await waitHome(guest);
+      const liveText = await wordText(guest);
       check.ok(liveText.includes('Hello sealoffice live'), `guest's copy holds what the host typed live (${liveText})`);
       check.ok(liveSockets.size > 0, `live pages connected to pinned relays only (${[...liveSockets].join(', ')})`);
       if (!reachable) {
@@ -657,6 +806,44 @@ async function main(): Promise<number> {
     } finally {
       await guestContext?.close();
     }
+
+    // Lost passphrase and recovery key: delete everything from the lock screen, in a fresh browser.
+    const lostContext = await newContext();
+    const lost = await lostContext.newPage();
+    watch(lost);
+    await lost.goto(`${origin}/`);
+    await waitHome(lost);
+    await lost.getByRole('button', { name: 'Word document', exact: true }).click();
+    await editorShown(lost);
+    await goHome(lost);
+    await openSettings(lost);
+    await dialog(lost).getByRole('button', { name: 'Protect with a passphrase…' }).click();
+    await dialog(lost).getByLabel('Passphrase', { exact: true }).fill(PASSPHRASE);
+    await dialog(lost).getByLabel('Repeat passphrase', { exact: true }).fill(PASSPHRASE);
+    await dialog(lost).getByRole('button', { name: 'Protect', exact: true }).click();
+    await storeRecoveryKey(lost);
+    await closeSettings(lost);
+    await lost.reload();
+    await lost.getByRole('button', { name: 'Lost both? Delete everything and start over' }).click();
+    const startOver = dialog(lost).getByRole('button', { name: 'Delete everything', exact: true });
+    await startOver.waitFor({ timeout: 10_000 });
+    const disabledAtFirst = await startOver.isDisabled();
+    await dialog(lost).getByRole('checkbox').check();
+    const disabledWithBoxOnly = await startOver.isDisabled();
+    await dialog(lost).getByLabel('Confirmation', { exact: true }).fill('delete');
+    const disabledWithWrongWord = await startOver.isDisabled();
+    await dialog(lost).getByLabel('Confirmation', { exact: true }).fill('DELETE');
+    const enabledAtLast = await startOver.isEnabled();
+    check.ok(disabledAtFirst && disabledWithBoxOnly && disabledWithWrongWord && enabledAtLast,
+      'Delete everything stays disabled until the box is ticked and DELETE typed');
+    await startOver.click();
+    await waitHome(lost);
+    await shot(lost, '13-started-over');
+    check.ok((await lost.locator('.doc-card').count()) === 0 && !(await lost.locator('#passphrase').isVisible()),
+      'deleting everything from the lock screen opens an empty home');
+    check.ok(await lost.locator('.home-footer').getByText('Not protected').isVisible(), 'after starting over the home footer says Not protected');
+    await lostContext.close();
+    check.ok(pageErrors.length === 0, `no uncaught errors (${pageErrors.join('; ')})`);
   } finally {
     await browser.close();
     server.stop(true);

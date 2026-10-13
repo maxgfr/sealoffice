@@ -12,10 +12,27 @@ reproduce, and the impact you expect. You should get a first answer within
 
 ## Scope
 
-In scope: the vault format and key handling, the seal-crypto wasm module, the
-page and service worker code (including `live.html` and live sessions), the
-recovery key, passkey and share-link key handling, the Content Security Policy, and the build and
+In scope: the library format and key handling (protected library, per-document
+locks, the crash-safe switch to a protected library), the seal-crypto wasm
+module, the page and service worker code (including `live.html` and live
+sessions), the recovery key, passkey and share-link key handling, encrypted
+exports and backups, the Content Security Policy, and the build and
 deployment pipeline.
+
+## Threat model in brief
+
+- **Unprotected library (default).** Readable by anyone with access to the
+  browser profile: the library key is stored in the clear next to the
+  encrypted documents. Reading it that way is not a vulnerability.
+- **Protected library.** Documents, versions and the index must not be
+  readable from a copy of the storage without the passphrase, the recovery
+  key or the passkey.
+- **Locked document.** Must not be readable without its own passphrase, even
+  with the library key or the recovery key. There is no recovery by design.
+- **Encrypted export.** An age or Office-protected download must not be
+  readable without the passphrase or password chosen for it.
+
+See the README's security model for details and known limits.
 
 Bugs in the document editor itself (vendor/ibis-office) that are not specific
 to sealoffice should also be reported to https://github.com/ibisjp/ibis-office.

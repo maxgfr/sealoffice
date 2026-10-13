@@ -13,13 +13,13 @@ export async function prfSupported(): Promise<boolean> {
   return capabilities['extension:prf'] === true;
 }
 
-/** Creates a passkey for this vault and lets it unlock the vault. */
+/** Creates a passkey for this protected library and lets it unlock the library. */
 export async function registerPasskey(vault: Vault): Promise<void> {
   const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
   const credential = await navigator.credentials.create({
     publicKey: {
       rp: { name: 'sealoffice' },
-      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'sealoffice vault', displayName: 'sealoffice vault' },
+      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'sealoffice library', displayName: 'sealoffice library' },
       challenge: crypto.getRandomValues(new Uint8Array(32)),
       pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
       authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
@@ -28,7 +28,7 @@ export async function registerPasskey(vault: Vault): Promise<void> {
   });
   if (!(credential instanceof PublicKeyCredential)) throw new Error('no passkey was created');
   const results = credential.getClientExtensionResults().prf;
-  if (!results?.enabled) throw new Error('this passkey cannot unlock the vault: it does not support the PRF extension');
+  if (!results?.enabled) throw new Error('this passkey cannot unlock the library: it does not support the PRF extension');
   const info: PasskeyInfo = { credentialId: base64url(new Uint8Array(credential.rawId)), salt: base64url(salt) };
   // Some authenticators evaluate PRF at creation; the others need one sign-in.
   const prf = results.results?.first ? prfBytes(results.results.first) : await evaluatePrf(info);
@@ -38,7 +38,7 @@ export async function registerPasskey(vault: Vault): Promise<void> {
 /** Unlocks `vault` with its registered passkey. */
 export async function unlockWithPasskey(vault: Vault): Promise<void> {
   const info = await vault.passkey();
-  if (!info) throw new Error('no passkey for this vault');
+  if (!info) throw new Error('no passkey for this library');
   await vault.unlockWithPrf(await evaluatePrf(info));
 }
 

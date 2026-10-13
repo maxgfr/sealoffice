@@ -116,4 +116,25 @@ describe('disk links', () => {
     const passphraseFile = crypto.encrypt_passphrase(bytes('elsewhere'), 'pw');
     expect(links.tryVaultKey(passphraseFile)).toBeNull();
   });
+
+  test('a locked linked document is written to disk for its own key, not the library key', async () => {
+    const store = new MemoryStore();
+    const vault = new Vault(store, crypto);
+    await vault.createUnprotected();
+    const handles = new MemoryHandles();
+    const links = new DiskLinks(handles, vault, crypto);
+    const entry = await vault.write('a.docx', bytes('first'));
+    const handle = new FakeHandle('a.docx.age');
+    await links.link(entry.id, handle, bytes('first'));
+    await vault.lockDoc(entry.id, 'doc pass');
+    await links.write(entry.id, bytes('second'));
+    const library = crypto.Identity.from_secret_key(new TextDecoder().decode(store.blobs.get('identity.key') ?? new Uint8Array()));
+    expect(() => library.decrypt(handle.content)).toThrow();
+    library.free();
+    expect(new TextDecoder().decode(vault.decryptFor(entry.id, handle.content))).toBe('second');
+    const wrapped = vault.entry(entry.id)?.lock?.wrapped ?? '';
+    const docKey = crypto.Identity.unlock(Uint8Array.from(atob(wrapped), (c) => c.charCodeAt(0)), 'doc pass');
+    expect(new TextDecoder().decode(docKey.decrypt(handle.content))).toBe('second');
+    docKey.free();
+  });
 });

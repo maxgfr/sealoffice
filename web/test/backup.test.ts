@@ -3,7 +3,7 @@ import { describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { backupFileName, createBackup, openBackup, restoreBackup, restoreIntoNewVault } from '../src/backup';
 import { MemoryStore } from '../src/store';
 import { readTar } from '../src/tar';
-import { Vault } from '../src/vault';
+import { DocLockedError, Vault } from '../src/vault';
 import { crypto } from './seal';
 
 // bun ignores bunfig's [test] timeout, and the default is reset per file: scrypt needs the intended 120 s.
@@ -95,4 +95,28 @@ describe('backup', () => {
     const notBackup = crypto.encrypt_passphrase(bytes('x'.repeat(1024)), 'pw');
     expect(() => openBackup(notBackup, 'pw', crypto)).toThrow();
   });
+
+  test('a locked document stays locked through a backup', async () => {
+    const source = await vaultWith();
+    const plain = source.list().find((e) => e.name === 'Été.xlsx');
+    if (!plain) throw new Error('missing');
+    await source.lockDoc(plain.id, 'doc pass');
+    const backup = await createBackup(source, 'backup pw', crypto);
+    const tar = readTar(crypto.decrypt_passphrase(backup.bytes, 'backup pw'));
+    const file = tar.find((f) => f.name.endsWith('-Été.xlsx'));
+    expect(file && crypto.is_age(file.bytes)).toBe(true);
+
+    const target = new Vault(new MemoryStore(), crypto);
+    await target.createUnprotected();
+    await restoreBackup(target, openBackup(backup.bytes, 'backup pw', crypto));
+    const restored = target.list().find((e) => e.name === 'Été.xlsx');
+    if (!restored) throw new Error('not restored');
+    expect(restored.lock).toBeDefined();
+    expect(restored.size).toBe(1);
+    expect(target.isDocOpen(restored.id)).toBe(false);
+    await expect(target.read(restored.id)).rejects.toThrow(DocLockedError);
+    await expect(target.openDoc(restored.id, 'wrong')).rejects.toThrow('wrong passphrase');
+    await target.openDoc(restored.id, 'doc pass');
+    expect(text(await target.read(restored.id))).toBe('b');
+  }, 60_000);
 });

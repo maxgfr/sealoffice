@@ -2,14 +2,21 @@
 :root {
   --bg: #f4f5f7;
   --surface: #ffffff;
+  --raised: #fafbfc;
   --text: #1c1f24;
   --muted: #5d6470;
   --border: #d9dde3;
   --accent: #2456c7;
+  --accent-soft: #e7eefc;
   --accent-text: #ffffff;
   --danger: #b42318;
   --focus: #2456c7;
+  --word: #2b5797;
+  --excel: #1e7145;
+  --powerpoint: #c2410c;
+  --other: #6b7280;
   --radius: 10px;
+  --appbar: 48px;
   font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   color: var(--text);
   background: var(--bg);
@@ -19,27 +26,36 @@
   :root {
     --bg: #15171b;
     --surface: #1f2228;
+    --raised: #252932;
     --text: #e8eaee;
     --muted: #a0a7b3;
     --border: #353a43;
     --accent: #7aa2ff;
+    --accent-soft: #24304d;
     --accent-text: #0d1220;
     --danger: #ff8a7a;
     --focus: #7aa2ff;
+    --word: #4f7fd0;
+    --excel: #3a9a68;
+    --powerpoint: #e0672f;
+    --other: #8a919c;
   }
 }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; width: 100vw; height: 100vh; overflow: hidden; background: var(--bg); }
 
-/* The editor draws the whole window into one canvas appended to <body>. */
-body > canvas { position: fixed; inset: 0; display: block; width: 100%; height: 100%; }
+/* The editor draws the whole window into one canvas appended to <body>, below
+   the app bar. On the home screen it stays alive but hidden. */
+body > canvas { position: fixed; top: var(--appbar); left: 0; display: block; width: 100%; height: calc(100% - var(--appbar)); }
+body.at-home > canvas { visibility: hidden; }
 
 #app { position: fixed; inset: 0; display: grid; place-items: center; overflow: auto; padding: 24px; }
 #app:empty { display: none; }
 
 h1 { font-size: 1.5rem; margin: 0 0 8px; }
 h2 { font-size: 1.15rem; margin: 0 0 12px; }
+h3 { font-size: 0.95rem; margin: 0 0 8px; }
 p { margin: 0 0 12px; }
 a { color: var(--accent); }
 code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
@@ -47,6 +63,7 @@ code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; word-break: br
 .muted { color: var(--muted); }
 .small { font-size: 0.85rem; }
 .hidden { display: none; }
+[hidden] { display: none !important; }
 
 .card {
   background: var(--surface);
@@ -55,7 +72,11 @@ code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; word-break: br
   padding: 28px;
   box-shadow: 0 8px 30px rgb(0 0 0 / 0.08);
 }
-.lock { width: min(440px, 100%); }
+.lock { width: min(420px, 100%); }
+.lock .brand { margin-bottom: 16px; }
+.lock-links { display: flex; flex-direction: column; align-items: center; gap: 6px; margin-top: 4px; }
+.lock-links button.link { font-weight: 400; color: var(--accent); font-size: 0.9rem; }
+.brand { font-weight: 700; letter-spacing: -0.01em; font-size: 1.05rem; }
 
 button {
   font: inherit;
@@ -67,12 +88,15 @@ button {
   cursor: pointer;
 }
 button:hover { border-color: var(--muted); }
-button:disabled { opacity: 0.6; cursor: progress; }
+button:disabled { opacity: 0.55; cursor: not-allowed; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 button.danger { background: var(--danger); border-color: var(--danger); color: var(--surface); }
 button.danger-link { color: var(--danger); }
 button.link { border: none; padding: 0; color: var(--text); font-weight: 600; text-align: left; }
 button.link:hover { text-decoration: underline; }
+.icon-button { display: inline-grid; place-items: center; width: 32px; height: 32px; padding: 0; border-color: transparent; border-radius: 8px; }
+.icon-button:hover { background: var(--bg); border-color: var(--border); }
+.icon-button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 input {
@@ -84,15 +108,26 @@ input {
   padding: 8px 10px;
   width: 100%;
 }
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px 8px;
+}
 
 .form { display: grid; gap: 12px; }
 .field { display: grid; gap: 4px; font-size: 0.9rem; }
+.field:has(input[type="checkbox"]) { display: flex; align-items: center; gap: 8px; }
+.field input[type="checkbox"] { width: auto; }
 .form-error { color: var(--danger); margin: 0; min-height: 1.2em; font-size: 0.9rem; }
-.actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .choices { display: grid; gap: 8px; }
 
 .dialog {
-  width: min(460px, calc(100vw - 32px));
+  width: min(480px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
   color: var(--text);
   background: var(--surface);
   border: 1px solid var(--border);
@@ -100,6 +135,7 @@ input {
   padding: 24px;
 }
 .dialog::backdrop { background: rgb(0 0 0 / 0.4); }
+.dialog .doc-list { max-height: 50vh; overflow: auto; }
 
 .overlay {
   position: fixed;
@@ -111,41 +147,185 @@ input {
   overflow: auto;
   background: var(--bg);
 }
-.vault { width: min(760px, 100%); display: grid; gap: 16px; }
-.vault-header { display: flex; justify-content: space-between; align-items: center; }
-.vault-header h1 { margin: 0; }
-.new-row, .toolbar-row { display: flex; flex-wrap: wrap; gap: 8px; }
-.vault-footer { display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--border); padding-top: 16px; }
 
+/* Rows in dialogs (version history). */
 .doc-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
 .doc { display: flex; align-items: center; gap: 12px; padding: 10px 8px; border-radius: 8px; }
 .doc:hover { background: var(--bg); }
 .doc-main { display: grid; flex: 1; min-width: 0; }
-.doc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .doc-actions { display: flex; gap: 6px; }
-.empty { padding: 16px 8px; }
+.report { margin: 0 0 12px; padding-left: 18px; display: grid; gap: 4px; overflow-wrap: anywhere; }
 
-.badge {
-  flex: none;
-  width: 44px;
-  text-align: center;
-  font-size: 0.7rem;
-  font-weight: 700;
-  border-radius: 5px;
-  padding: 3px 0;
-  color: #fff;
-  background: #6b7280;
+/* File icons: a coloured page with its format's label. */
+.file-icon { flex: none; display: block; }
+.file-icon .file-page { fill: var(--surface); stroke: currentColor; stroke-width: 2; }
+.file-icon .file-fold { fill: currentColor; opacity: 0.35; }
+.file-icon .file-band { fill: currentColor; }
+.file-icon .file-label { fill: #fff; font: 700 8.5px system-ui, sans-serif; letter-spacing: 0.02em; }
+.file-icon.docx { color: var(--word); }
+.file-icon.xlsx { color: var(--excel); }
+.file-icon.pptx { color: var(--powerpoint); }
+.file-icon.other { color: var(--other); }
+.icon { flex: none; display: block; }
+
+/* Home screen. */
+.home { position: fixed; inset: 0; z-index: 5; overflow: auto; background: var(--bg); }
+.home.dropping { outline: 3px dashed var(--accent); outline-offset: -10px; }
+.home-bar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 56px;
+  padding: 0 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
 }
-.badge.docx, .badge.docm, .badge.dotx, .badge.dotm { background: #2b5797; }
-.badge.xlsx, .badge.xlsm, .badge.xltx, .badge.xltm, .badge.csv { background: #1e7145; }
-.badge.pptx, .badge.pptm, .badge.ppsx, .badge.ppsm, .badge.potx, .badge.potm { background: #c2410c; }
+.home-bar .search { flex: 0 1 420px; margin: 0 auto; padding: 6px 12px; border-radius: 999px; }
+.home-bar-actions { display: flex; gap: 6px; }
+.home-bar-actions button { border-color: transparent; }
+.home-bar-actions button:hover { border-color: var(--border); }
+.home-main { width: min(1120px, 100%); margin: 0 auto; padding: 24px 24px 40px; display: grid; gap: 28px; }
+.home-section h2 { font-size: 1rem; margin: 0; }
+.home-section > h2 { margin-bottom: 12px; }
+.banner { padding: 10px 12px; border: 1px solid var(--danger); border-radius: 8px; }
 
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+.tile {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  min-height: 116px;
+  padding: 16px;
+  text-align: left;
+  font-weight: 600;
+  background: var(--surface);
+  border-radius: var(--radius);
+  border-top: 4px solid var(--other);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.tile:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgb(0 0 0 / 0.08); }
+.tile.docx { border-top-color: var(--word); }
+.tile.xlsx { border-top-color: var(--excel); }
+.tile.pptx { border-top-color: var(--powerpoint); }
+.tile.open-file { border-top-color: var(--accent); gap: 4px; }
+.tile.open-file .muted { font-weight: 400; }
+.tile-glyph { color: var(--accent); margin-bottom: 6px; }
+
+.section-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.doc-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; flex: 1; justify-content: space-between; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border-radius: 999px; padding: 3px 12px; font-size: 0.85rem; background: var(--surface); }
+.chip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.chip.add { border-style: dashed; }
+.view-controls { display: flex; align-items: center; gap: 8px; }
+.segmented { display: flex; gap: 2px; }
+
+.doc-grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.doc-card {
+  position: relative;
+  display: grid;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.doc-card:hover { border-color: var(--muted); }
+.doc-card.is-open { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.doc-open {
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+  padding: 16px 16px 8px;
+  border: none;
+  border-radius: var(--radius) var(--radius) 0 0;
+  text-align: left;
+  min-width: 0;
+}
+.doc-open:disabled { opacity: 1; cursor: default; }
+.doc-text { display: grid; min-width: 0; width: 100%; }
+.doc-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badges { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 16px 12px; min-height: 8px; }
+.badge-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  color: var(--muted);
+  background: var(--bg);
+}
+.badge-pill.open { color: var(--accent); background: var(--accent-soft); }
+.doc-more { position: absolute; top: 8px; right: 8px; }
+
+/* List view: one row per document. */
+ul.doc-list { display: grid; gap: 4px; padding: 0; margin: 0; }
+ul.doc-list .doc-card { grid-template-columns: 1fr auto 40px; align-items: center; }
+ul.doc-list .doc-open { grid-auto-flow: column; justify-content: start; align-items: center; padding: 8px 12px; border-radius: var(--radius); }
+ul.doc-list .badges { padding: 0 8px; }
+ul.doc-list .doc-more { position: static; }
+
+.empty-state { display: grid; justify-items: start; gap: 4px; padding: 24px; border: 1px dashed var(--border); border-radius: var(--radius); }
+.home-footer { display: grid; gap: 4px; border-top: 1px solid var(--border); padding-top: 16px; }
+.home-footer button.link { font-weight: 600; color: var(--accent); font-size: inherit; }
+
+/* Editor download progress, above the tiles. */
 .editor-status { display: grid; gap: 6px; }
 .progress { height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
 .progress-bar { width: 0; height: 100%; background: var(--accent); transition: width 0.1s linear; }
 .progress.indeterminate .progress-bar { width: 30%; animation: sweep 1.2s linear infinite; }
 @keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
 
+/* Menus (ui.ts menuButton): fixed, placed next to their button. */
+.menu {
+  position: fixed;
+  z-index: 40;
+  display: grid;
+  min-width: 200px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.16);
+}
+.menu [role="menuitem"] { display: flex; justify-content: space-between; gap: 16px; border: none; border-radius: 5px; padding: 6px 10px; text-align: left; }
+.menu [role="menuitem"]:hover:not(:disabled), .menu [role="menuitem"]:focus-visible { background: var(--accent-soft); outline: none; }
+.menu-arrow { color: var(--muted); }
+
+/* Editor screen: the app bar above the canvas. */
+.appbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--appbar);
+  padding: 0 8px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.appbar button { border-color: transparent; padding: 5px 10px; }
+.appbar button:hover { border-color: var(--border); }
+.appbar-home, .appbar-action { display: inline-flex; align-items: center; gap: 6px; }
+.appbar-icon { display: grid; place-items: center; }
+.appbar-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.appbar .appbar-name { font-weight: 600; max-width: 32vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.appbar-rename { width: min(320px, 40vw); padding: 4px 8px; }
+.save-state { white-space: nowrap; }
+.appbar-spacer { flex: 1; }
+
+/* Settings dialog. */
+.settings-section { border-top: 1px solid var(--border); padding: 14px 0 4px; }
+.settings-section:first-child { border-top: none; padding-top: 0; }
+.settings-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.settings-section button.link { font-weight: 400; color: var(--accent); }
+
+/* Live session bar (live.html). */
 .pill {
   position: fixed;
   top: 8px;
@@ -161,44 +341,13 @@ input {
 }
 .pill button { border: none; border-radius: 999px; padding: 3px 10px; font-size: 0.8rem; }
 .pill button:hover { background: var(--bg); }
-/* Over the editor, sit on the menu bar row (its right end is empty) so the
-   title bar's own buttons stay reachable, and stay quiet until pointed at. */
-.pill.over-editor { top: 37px; opacity: 0.55; }
-.pill.over-editor:hover, .pill.over-editor:focus-within { opacity: 1; }
+.pill [role="status"] { align-self: center; padding: 0 8px; font-size: 0.8rem; }
 
 .powered { font-weight: 600; }
 .hashes { display: grid; gap: 2px; margin: 0 0 12px; font-size: 0.8rem; }
 .hashes dd { margin: 0 0 6px; }
 
-@media (max-width: 560px) {
-  .doc { flex-wrap: wrap; }
-  .doc-actions { width: 100%; justify-content: flex-end; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .progress-bar { transition: none; }
-  .progress.indeterminate .progress-bar { animation: none; width: 100%; }
-}
-
-/* Vault list: search, sort and folder filter; folder groups; drop target. */
-.filter-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.filter-row .search { flex: 1 1 200px; width: auto; }
-select {
-  font: inherit;
-  color: var(--text);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 7px 8px;
-}
-.folder-heading { padding: 12px 8px 4px; font-size: 0.8rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-.vault.dropping { outline: 2px dashed var(--accent); outline-offset: -8px; }
-.storage { margin: 0; }
-.storage button.link { font-weight: 400; color: var(--accent); }
-.report { margin: 0 0 12px; padding-left: 18px; display: grid; gap: 4px; overflow-wrap: anywhere; }
-.dialog .doc-list { max-height: 50vh; overflow: auto; }
-
-/* Recovery key and the save state in the toolbar. */
+/* Recovery key and share links. */
 .recovery-key {
   margin: 0;
   padding: 10px 12px;
@@ -210,6 +359,18 @@ select {
   word-break: break-all;
   user-select: all;
 }
-.field:has(input[type="checkbox"]) { display: flex; align-items: center; gap: 8px; }
-.field input[type="checkbox"] { width: auto; }
-.pill [role="status"] { align-self: center; padding: 0 8px; font-size: 0.8rem; }
+
+@media (max-width: 640px) {
+  .home-bar { gap: 8px; padding: 0 12px; }
+  .home-bar .brand { display: none; }
+  .home-main { padding: 16px 12px 32px; }
+  .appbar .save-state, .appbar-action span { display: none; }
+  .doc { flex-wrap: wrap; }
+  .doc-actions { width: 100%; justify-content: flex-end; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-bar { transition: none; }
+  .progress.indeterminate .progress-bar { animation: none; width: 100%; }
+  .tile { transition: none; }
+}

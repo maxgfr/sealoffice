@@ -5,8 +5,8 @@ import { extension } from './importer';
 import { alert, confirm, errorMessage, form } from './ui';
 import type { Vault } from './vault';
 import { SaveTracker } from './savetracker';
-import type { OpenDoc, VaultView } from './vaultview';
-import { withExtension } from './vaultview';
+import type { OpenDoc } from './vaultview';
+import { withExtension } from './docactions';
 
 interface PickedFile {
   name: string;
@@ -25,10 +25,13 @@ export class Bridge {
   /** Fires once each editor save has been written to the vault (or failed). */
   readonly saved = new SaveSignal();
   private afterSave: ((id: string, bytes: Uint8Array) => Promise<void>) | null = null;
+  private name = '';
+  private writing = 0;
 
+  /** `pick` answers the editor's File > Open (null: nothing to open). */
   constructor(
     vault: Vault,
-    private readonly view: VaultView,
+    private readonly pickDoc: () => Promise<OpenDoc | null>,
   ) {
     this.tracker = new SaveTracker(vault, {
       askName: async (name) => {
@@ -37,16 +40,26 @@ export class Bridge {
         return chosen;
       },
       confirmReplace: async (name) => {
-        const replace = await confirm(`Replace "${name}"?`, 'A document with this name is already in the vault.', 'Replace', true);
+        const replace = await confirm(`Replace "${name}"?`, 'A document with this name is already in the library.', 'Replace', true);
         focusEditor();
         return replace;
       },
     });
   }
 
-  /** The vault document last opened or saved, for Export. */
+  /** The library document last opened or saved, for the app bar's actions. */
   get current(): string | null {
     return this.tracker.currentId;
+  }
+
+  /** The name of the document in the editor. */
+  get currentName(): string {
+    return this.name;
+  }
+
+  /** Whether an editor save is being written to the library right now. */
+  get saving(): boolean {
+    return this.writing > 0;
   }
 
   install(): void {
@@ -62,29 +75,34 @@ export class Bridge {
   /** Records the document handed to the editor. */
   track(doc: OpenDoc): void {
     this.tracker.opened(doc);
+    this.name = doc.name;
   }
 
   private async save(name: string, bytes: Uint8Array, saveAs: boolean): Promise<string | null> {
+    this.writing++;
     try {
       const stored = await this.tracker.save(name, bytes, saveAs);
+      if (stored !== null) this.name = stored;
       this.saved.emit({ name: stored });
       const id = this.tracker.currentId;
       if (stored !== null && id !== null && this.afterSave) {
         // The vault copy is safe; a failing extra copy is reported without failing the save.
         this.afterSave(id, bytes).catch((error: unknown) => {
           console.error(error);
-          void alert('Linked file not updated', `The vault has the document, but its file on disk was not updated: ${errorMessage(error)}`);
+          void alert('Linked file not updated', `The library has the document, but its file on disk was not updated: ${errorMessage(error)}`);
         });
       }
       return stored;
     } catch (error) {
       this.saved.emit({ error });
       throw error;
+    } finally {
+      this.writing--;
     }
   }
 
   private async pick(): Promise<PickedFile | null> {
-    const doc = await this.view.show({ choose: true, closable: true });
+    const doc = await this.pickDoc();
     focusEditor();
     if (!doc) return null;
     this.track(doc);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { describe, expect, setDefaultTimeout, test } from 'bun:test';
 import { MemoryStore } from '../src/store';
-import { MAX_VERSIONS, parseRecoveryKey, recoveryKeyFile, Vault, VaultLockedError } from '../src/vault';
+import { DocLockedError, MAX_VERSIONS, parseRecoveryKey, recoveryKeyFile, Vault, VaultLockedError } from '../src/vault';
 import { crypto } from './seal';
 
 // bun ignores bunfig's [test] timeout, and the default is reset per file: scrypt needs the intended 120 s.
@@ -336,5 +336,295 @@ describe('vault', () => {
     expect(store.blobs.size).toBe(0);
     expect(vault.unlocked).toBe(false);
     expect(await vault.exists()).toBe(false);
+  });
+
+  test('an unprotected library reopens without a passphrase', async () => {
+    const store = new MemoryStore();
+    const vault = new Vault(store, crypto);
+    expect(await vault.state()).toBe('none');
+    await vault.createUnprotected();
+    expect(vault.unlocked).toBe(true);
+    expect(vault.isProtected).toBe(false);
+    expect(await vault.state()).toBe('open');
+    expect(await vault.exists()).toBe(true);
+    await expect(vault.createUnprotected()).rejects.toThrow('a vault already exists');
+    const a = await vault.write('a.docx', bytes('open text'));
+    expect(text(store.blobs.get('identity.key') ?? new Uint8Array())).toStartWith('AGE-SECRET-KEY-1');
+    expect(store.blobs.has('identity.age')).toBe(false);
+    vault.lock();
+    const reopened = new Vault(store, crypto);
+    await reopened.openUnprotected();
+    expect(reopened.unlocked).toBe(true);
+    expect(text(await reopened.read(a.id))).toBe('open text');
+  });
+
+  test('protect rotates the key, keeps the versions and shows a recovery key', async () => {
+    const store = new MemoryStore();
+    const vault = new Vault(store, crypto);
+    await vault.createUnprotected();
+    const a = await vault.write('a.docx', bytes('v1'));
+    await vault.write('a.docx', bytes('v2'), a.id);
+    const oldKey = text(store.blobs.get('identity.key') ?? new Uint8Array());
+    const recovery = await vault.protect(PASS);
+    expect(parseRecoveryKey(recovery)).toBe(recovery);
+    expect(recovery).not.toBe(oldKey);
+    expect(vault.isProtected).toBe(true);
+    expect(await vault.state()).toBe('protected');
+    expect(store.blobs.has('identity.key')).toBe(false);
+    expect([...store.blobs.keys()].filter((k) => k.endsWith('.next'))).toEqual([]);
+    const old = crypto.Identity.from_secret_key(oldKey);
+    for (const [key, blob] of store.blobs) {
+      if (key.startsWith('docs/') || key === 'index.age') expect(() => old.decrypt(blob)).toThrow();
+    }
+    old.free();
+    expect(text(await vault.read(a.id))).toBe('v2');
+    expect(text(await vault.readVersion(a.id, 0))).toBe('v1');
+    expect(await vault.recoveryKey(PASS)).toBe(recovery);
+    vault.lock();
+    const reopened = new Vault(store, crypto);
+    await expect(reopened.openUnprotected()).rejects.toThrow('protected');
+    await reopened.unlock(PASS);
+    expect(text(await reopened.readVersion(a.id, 0))).toBe('v1');
+  });
+
+  test('a crash at any put of protect leaves a library that opens', async () => {
+    class CrashingStore extends MemoryStore {
+      puts = 0;
+      crashAt = Infinity;
+
+      override async put(key: string, value: Uint8Array): Promise<void> {
+        if (++this.puts === this.crashAt) throw new Error('crash');
+        await super.put(key, value);
+      }
+    }
+    const build = async (): Promise<{ store: CrashingStore; vault: Vault; a: string; b: string }> => {
+      const store = new CrashingStore();
+      const vault = new Vault(store, crypto);
+      await vault.createUnprotected();
+      const a = await vault.write('a.docx', bytes('a1'));
+      await vault.write('a.docx', bytes('a2'), a.id);
+      const b = await vault.write('b.xlsx', bytes('b1'));
+      store.puts = 0;
+      return { store, vault, a: a.id, b: b.id };
+    };
+    const probe = await build();
+    await probe.vault.protect(PASS);
+    const total = probe.store.puts;
+    expect(total).toBeGreaterThan(4);
+    for (let n = 1; n <= total; n++) {
+      const { store, vault, a, b } = await build();
+      store.crashAt = n;
+      await expect(vault.protect(PASS)).rejects.toThrow('crash');
+      store.crashAt = Infinity;
+      const reopened = new Vault(store, crypto);
+      const state = await reopened.state();
+      if (state === 'open') await reopened.openUnprotected();
+      else if (state === 'protected') await reopened.unlock(PASS);
+      else throw new Error(`no library after a crash at put ${n}`);
+      expect(text(await reopened.read(a))).toBe('a2');
+      expect(text(await reopened.readVersion(a, 0))).toBe('a1');
+      expect(text(await reopened.read(b))).toBe('b1');
+      expect([...store.blobs.keys()].filter((k) => k.endsWith('.next'))).toEqual([]);
+    }
+  });
+
+  test('unprotect stores the key in the clear and drops the passkey', async () => {
+    const { store, vault } = await fresh();
+    const a = await vault.write('a.docx', bytes('kept'));
+    await vault.addPasskey(new Uint8Array(32).fill(7), { credentialId: 'id', salt: 'salt' });
+    await expect(vault.unprotect('wrong passphrase!')).rejects.toThrow('wrong passphrase');
+    expect(await vault.state()).toBe('protected');
+    await vault.unprotect(PASS);
+    expect(vault.isProtected).toBe(false);
+    expect(await vault.state()).toBe('open');
+    expect(await vault.passkey()).toBeNull();
+    expect(store.blobs.has('identity.age')).toBe(false);
+    expect(store.blobs.has('identity.passkey.age')).toBe(false);
+    vault.lock();
+    const reopened = new Vault(store, crypto);
+    await reopened.openUnprotected();
+    expect(text(await reopened.read(a.id))).toBe('kept');
+  });
+
+  test('a v0.2 vault opens as a protected library', async () => {
+    const { store, vault } = await fresh();
+    const a = await vault.write('a.docx', bytes('old vault'));
+    vault.lock();
+    const reopened = new Vault(store, crypto);
+    expect(await reopened.state()).toBe('protected');
+    await reopened.unlock(PASS);
+    expect(reopened.isProtected).toBe(true);
+    expect(text(await reopened.read(a.id))).toBe('old vault');
+  });
+
+  test('a document lock round-trips and refuses a wrong passphrase', async () => {
+    const store = new MemoryStore();
+    const vault = new Vault(store, crypto);
+    await vault.createUnprotected();
+    const a = await vault.write('a.docx', bytes('secret v1'));
+    await vault.write('a.docx', bytes('secret v2'), a.id);
+    const other = await vault.write('b.docx', bytes('plain'));
+    const locked = await vault.lockDoc(a.id, 'doc pass');
+    expect(locked.lock?.wrapped).toBeString();
+    expect(vault.isDocOpen(a.id)).toBe(true);
+    expect(vault.isDocOpen(other.id)).toBe(true);
+    await vault.write('a.docx', bytes('secret v3'), a.id);
+    expect(vault.entry(a.id)?.lock).toEqual(locked.lock);
+
+    vault.forgetDocKeys();
+    expect(vault.isDocOpen(a.id)).toBe(false);
+    await expect(vault.read(a.id)).rejects.toThrow(DocLockedError);
+    await expect(vault.readVersion(a.id, 0)).rejects.toThrow(DocLockedError);
+    await expect(vault.write('a.docx', bytes('x'), a.id)).rejects.toThrow(DocLockedError);
+    await expect(vault.restoreVersion(a.id, 0)).rejects.toThrow(DocLockedError);
+    const wrong = vault.openDoc(a.id, 'not it');
+    await expect(wrong).rejects.toThrow('wrong passphrase');
+    await wrong.catch((error: unknown) => expect(error).not.toBeInstanceOf(DocLockedError));
+    expect(vault.isDocOpen(a.id)).toBe(false);
+    await vault.openDoc(a.id, 'doc pass');
+    expect(text(await vault.read(a.id))).toBe('secret v3');
+
+    await expect(vault.removeDocLock(a.id, 'not it')).rejects.toThrow('wrong passphrase');
+    const unlocked = await vault.removeDocLock(a.id, 'doc pass');
+    expect(unlocked.lock).toBeUndefined();
+    vault.lock();
+    const reopened = new Vault(store, crypto);
+    await reopened.openUnprotected();
+    expect(text(await reopened.read(a.id))).toBe('secret v3');
+    expect(text(await reopened.readVersion(a.id, 1))).toBe('secret v1');
+  });
+
+  test('a locked document and its versions are unreadable without its key', async () => {
+    const store = new MemoryStore();
+    const vault = new Vault(store, crypto);
+    await vault.createUnprotected();
+    const a = await vault.write('a.docx', bytes('one'));
+    await vault.write('a.docx', bytes('two'), a.id);
+    const locked = await vault.lockDoc(a.id, 'doc pass');
+    vault.lock();
+    expect(vault.isDocOpen(a.id)).toBe(false);
+    const library = crypto.Identity.from_secret_key(text(store.blobs.get('identity.key') ?? new Uint8Array()));
+    for (const blob of [locked.blob, ...locked.versions.map((v) => v.blob)]) {
+      const ct = store.blobs.get(blob);
+      if (!ct) throw new Error('blob missing');
+      expect(() => library.decrypt(ct)).toThrow();
+    }
+    library.free();
+    const reopened = new Vault(store, crypto);
+    await reopened.openUnprotected();
+    await expect(reopened.readVersion(a.id, 0)).rejects.toThrow(DocLockedError);
+    // Protecting the library leaves the document lock as it is.
+    await reopened.protect(PASS);
+    await expect(reopened.read(a.id)).rejects.toThrow(DocLockedError);
+    await reopened.openDoc(a.id, 'doc pass');
+    expect(text(await reopened.readVersion(a.id, 0))).toBe('one');
+  });
+
+  test('forgetDocKey frees one locked document key only', async () => {
+    const vault = new Vault(new MemoryStore(), crypto);
+    await vault.createUnprotected();
+    const a = await vault.write('a.docx', bytes('a'));
+    const b = await vault.write('b.docx', bytes('b'));
+    await vault.lockDoc(a.id, 'doc pass a');
+    await vault.lockDoc(b.id, 'doc pass b');
+    vault.forgetDocKey(a.id);
+    expect(vault.isDocOpen(a.id)).toBe(false);
+    await expect(vault.read(a.id)).rejects.toThrow(DocLockedError);
+    expect(text(await vault.read(b.id))).toBe('b');
+    // Forgetting a key not in memory, or of an unlocked document, does nothing.
+    vault.forgetDocKey(a.id);
+    vault.forgetDocKey('no-such-id');
+  });
+
+  test('recipientFor is the document key of a locked document', async () => {
+    const store = new MemoryStore();
+    const vault = new Vault(store, crypto);
+    await vault.createUnprotected();
+    const a = await vault.write('a.docx', bytes('a'));
+    expect(vault.recipientFor(a.id)).toBe(vault.recipient());
+    await vault.lockDoc(a.id, 'doc pass');
+    expect(vault.recipientFor(a.id)).not.toBe(vault.recipient());
+    const ct = crypto.encrypt_to(vault.recipientFor(a.id), bytes('on disk'));
+    expect(text(vault.decryptFor(a.id, ct))).toBe('on disk');
+    expect(() => vault.decryptForVault(ct)).toThrow();
+    vault.forgetDocKey(a.id);
+    expect(() => vault.recipientFor(a.id)).toThrow(DocLockedError);
+  });
+
+  test('a crash at any put or delete of unprotect leaves no clear key beside a protected library', async () => {
+    class CrashingStore extends MemoryStore {
+      ops = 0;
+      crashAt = Infinity;
+
+      override async put(key: string, value: Uint8Array): Promise<void> {
+        if (++this.ops === this.crashAt) throw new Error('crash');
+        await super.put(key, value);
+      }
+
+      override async delete(key: string): Promise<void> {
+        if (++this.ops === this.crashAt) throw new Error('crash');
+        await super.delete(key);
+      }
+    }
+    const build = async (): Promise<{ store: CrashingStore; vault: Vault; a: string }> => {
+      const store = new CrashingStore();
+      const vault = new Vault(store, crypto);
+      await vault.create(PASS);
+      const a = await vault.write('a.docx', bytes('kept'));
+      await vault.addPasskey(new Uint8Array(32).fill(7), { credentialId: 'id', salt: 'salt' });
+      store.ops = 0;
+      return { store, vault, a: a.id };
+    };
+    const probe = await build();
+    await probe.vault.unprotect(PASS);
+    const total = probe.store.ops;
+    expect(total).toBe(4);
+    for (let n = 1; n <= total; n++) {
+      const { store, vault, a } = await build();
+      store.crashAt = n;
+      await expect(vault.unprotect(PASS)).rejects.toThrow('crash');
+      store.crashAt = Infinity;
+      const reopened = new Vault(store, crypto);
+      const state = await reopened.state();
+      if (store.blobs.has('identity.key')) {
+        expect(state).toBe('open');
+        expect(store.blobs.has('identity.age')).toBe(false);
+        expect(store.blobs.has('identity.passkey.age')).toBe(false);
+        expect(store.blobs.has('passkey.json')).toBe(false);
+        await reopened.openUnprotected();
+      } else {
+        expect(state).toBe('protected');
+        await reopened.unlock(PASS);
+      }
+      expect(text(await reopened.read(a))).toBe('kept');
+    }
+  });
+
+  test('a failure after protect decided its commit closes the vault; reopening keeps every write', async () => {
+    class CommitFailStore extends MemoryStore {
+      failNextIndex = false;
+
+      override async put(key: string, value: Uint8Array): Promise<void> {
+        if (this.failNextIndex && key === 'index.age' && this.blobs.has('identity.age.next')) {
+          this.failNextIndex = false;
+          throw new Error('quota exceeded');
+        }
+        await super.put(key, value);
+      }
+    }
+    const store = new CommitFailStore();
+    const vault = new Vault(store, crypto);
+    await vault.createUnprotected();
+    const a = await vault.write('a.docx', bytes('a1'));
+    await vault.write('a.docx', bytes('a2'), a.id);
+    store.failNextIndex = true;
+    await expect(vault.protect(PASS)).rejects.toThrow('quota exceeded');
+    await expect(vault.write('b.docx', bytes('late'))).rejects.toThrow(VaultLockedError);
+    const reopened = new Vault(store, crypto);
+    expect(await reopened.state()).toBe('protected');
+    await reopened.unlock(PASS);
+    expect(text(await reopened.read(a.id))).toBe('a2');
+    expect(text(await reopened.readVersion(a.id, 0))).toBe('a1');
+    expect(reopened.list().map((e) => e.name)).toEqual(['a.docx']);
   });
 });

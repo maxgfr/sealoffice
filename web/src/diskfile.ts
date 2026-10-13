@@ -2,7 +2,7 @@
 // Vault documents linked to a .age file on disk (File System Access API:
 // Chrome and Edge). Every vault save of a linked document rewrites the file,
 // encrypted to the vault key, so `age -d -i sealoffice-recovery-key.txt`
-// opens it. File handles are kept in IndexedDB; they are not secret.
+// opens it; a locked document's file is encrypted to that document's own key. File handles are kept in IndexedDB; they are not secret.
 
 /** The part of a FileSystemFileHandle a link uses. */
 export interface DiskHandle {
@@ -23,7 +23,7 @@ export interface HandleStore {
 
 /** The vault operations a link needs. */
 export interface LinkVault {
-  recipient(): string;
+  recipientFor(id: string): string;
   decryptForVault(ct: Uint8Array): Uint8Array;
 }
 
@@ -78,7 +78,7 @@ export class DiskLinks {
     const handle = await this.handles.get(id);
     if (!handle) return;
     await ensureWritable(handle);
-    const ct = this.seal.encrypt_to(this.vault.recipient(), bytes);
+    const ct = this.seal.encrypt_to(this.vault.recipientFor(id), bytes);
     const writable = await handle.createWritable();
     await writable.write(new Uint8Array(ct));
     await writable.close();
