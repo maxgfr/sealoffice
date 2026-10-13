@@ -7,12 +7,18 @@ import { base64url, fromBase64url } from '../vault';
 export type LiveMessage =
   | { type: 'hello'; name: string }
   | { type: 'snapshot'; seq: number; name: string; bytes: Uint8Array }
-  | { type: 'pen-request'; name: string }
+  /** To the host; `auto` when the peer started typing (the pen then moves without asking, once the holder has paused). */
+  | { type: 'pen-request'; name: string; auto?: boolean }
   | { type: 'pen-grant'; peer: string }
-  /** Host → holder: save and broadcast your last changes, the pen is about to move. */
-  | { type: 'pen-release' }
+  /**
+   * Host → holder: save and broadcast your last changes, the pen is about to move.
+   * With `ifIdleMs`, only if you have not typed for that long; else answer 'pen-busy'.
+   */
+  | { type: 'pen-release'; ifIdleMs?: number }
   /** Holder → host: done; `seq` is the last snapshot sent. */
   | { type: 'pen-released'; seq: number }
+  /** The pen stays with `holder`, who is typing: holder → host, then host → the peer that asked. */
+  | { type: 'pen-busy'; holder: string }
   | { type: 'presence'; host: string; pen: string; seq: number };
 
 const NONCE_BYTES = 12;
@@ -63,14 +69,17 @@ function isLiveMessage(m: unknown): m is LiveMessage {
   const r = m as Record<string, unknown>;
   switch (r.type) {
     case 'hello':
-    case 'pen-request':
       return typeof r.name === 'string';
+    case 'pen-request':
+      return typeof r.name === 'string' && (r.auto === undefined || typeof r.auto === 'boolean');
     case 'snapshot':
       return typeof r.seq === 'number' && Number.isInteger(r.seq) && typeof r.name === 'string' && r.bytes instanceof Uint8Array;
     case 'pen-grant':
       return typeof r.peer === 'string';
     case 'pen-release':
-      return true;
+      return r.ifIdleMs === undefined || (typeof r.ifIdleMs === 'number' && Number.isFinite(r.ifIdleMs) && r.ifIdleMs >= 0);
+    case 'pen-busy':
+      return typeof r.holder === 'string';
     case 'pen-released':
       return typeof r.seq === 'number';
     case 'presence':

@@ -31,6 +31,16 @@ export interface EditorSession {
 /** Shortest passphrase for a document lock. */
 const MIN_DOC_PASSPHRASE = 8;
 
+/** What a live session exposes, said before one starts. */
+export const LIVE_PRIVACY = 'Connections go through public Nostr relays and directly between browsers, which see each other\'s IP address. ' +
+  'Everything sent is end-to-end encrypted.';
+
+/** Leaves for live.html as the host of a new session on library document `id`. */
+export function hostLive(id: string): void {
+  const { room, key } = newSessionSecrets();
+  location.assign(new URL(`live.html#r=${room}&k=${key}&h=${id}`, location.href).href);
+}
+
 export class DocActions {
   private session: EditorSession | null = null;
   private links: DiskLinks | null = null;
@@ -237,14 +247,12 @@ export class DocActions {
       : entry.lock ? ' You will enter the document passphrase again.' : '';
     if (!(await confirm(
       'Start a live session?',
-      `"${entry.name}" opens in a live session: people you invite see each save and can ask for the pen to edit. ` +
-      'Connections go through public Nostr relays and directly between browsers, which see each other\'s IP address. ' +
-      `Everything sent is end-to-end encrypted.${again}`,
+      `"${entry.name}" opens in a live session: people you invite see each save, and typing takes the pen once the one editing pauses. ` +
+      `${LIVE_PRIVACY}${again}`,
       'Start',
     ))) return;
     if (!(await this.saveOpenDoc('Start'))) return;
-    const { room, key } = newSessionSecrets();
-    location.assign(new URL(`live.html#r=${room}&k=${key}&h=${entry.id}`, location.href).href);
+    hostLive(entry.id);
   }
 
   /** Makes a share link for the saved version of `id`. */

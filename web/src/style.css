@@ -210,8 +210,8 @@ select {
 .tile.docx { border-top-color: var(--word); }
 .tile.xlsx { border-top-color: var(--excel); }
 .tile.pptx { border-top-color: var(--powerpoint); }
-.tile.open-file { border-top-color: var(--accent); gap: 4px; }
-.tile.open-file .muted { font-weight: 400; }
+.tile.open-file, .tile.live { border-top-color: var(--accent); gap: 4px; }
+.tile.open-file .muted, .tile.live .muted { font-weight: 400; }
 .tile-glyph { color: var(--accent); margin-bottom: 6px; }
 
 .section-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }

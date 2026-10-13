@@ -8,13 +8,13 @@
 // browser contexts. Run with `bun run test:e2e` after `scripts/build.sh`.
 // SHOTS=<dir> saves screenshots; HEADED=1 shows the browser.
 // LIVE_RELAYS=local forces the in-process Nostr relay instead of the public ones.
-import type { BrowserContext, Page, WebSocketRoute } from 'playwright';
+import type { BrowserContext, Page } from 'playwright';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { RELAYS } from '../../src/live/transport';
 import {
-  Check, DIST, SHOTS, WORD, appbar, card, cardMenu, dialog, editorShown, goHome, hasWebGpu, home, launch, openCard, readClipboard,
-  serve, shot, typeInEditor, waitHome, wordText,
+  Check, DIST, type LocalRelay, SHOTS, WORD, appbar, card, cardMenu, dialog, editorShown, goHome, hasWebGpu, home, launch, openCard, readClipboard,
+  routeRelays, serve, shot, typeInEditor, waitHome, wordText,
 } from './lib';
 
 const PASSPHRASE = 'correct horse battery staple';
@@ -103,80 +103,6 @@ async function closeSettings(page: Page): Promise<void> {
 }
 
 const normalizeWs = (url: string): string => url.replace(/\/+$/, '');
-
-/** A minimal NIP-01 relay in this process: EVENT / REQ / CLOSE / EOSE with fan-out. */
-interface NostrEvent {
-  id: string;
-  pubkey: string;
-  kind: number;
-  created_at: number;
-  tags: string[][];
-}
-type NostrFilter = Record<string, unknown>;
-
-class LocalRelay {
-  private readonly stored: NostrEvent[] = [];
-  private readonly subs = new Map<WebSocketRoute, Map<string, NostrFilter[]>>();
-  events = 0;
-
-  attach(ws: WebSocketRoute): void {
-    this.subs.set(ws, new Map());
-    ws.onMessage((raw) => this.receive(ws, typeof raw === 'string' ? raw : raw.toString()));
-    ws.onClose(() => this.subs.delete(ws));
-  }
-
-  private receive(ws: WebSocketRoute, raw: string): void {
-    let msg: unknown;
-    try {
-      msg = JSON.parse(raw);
-    } catch {
-      ws.send(JSON.stringify(['NOTICE', 'invalid JSON']));
-      return;
-    }
-    if (!Array.isArray(msg)) return;
-    const [type, ...rest] = msg as [string, ...unknown[]];
-    if (type === 'EVENT') {
-      const event = rest[0] as NostrEvent;
-      this.events++;
-      ws.send(JSON.stringify(['OK', event.id, true, '']));
-      const ephemeral = event.kind >= 20000 && event.kind < 30000;
-      if (!ephemeral) this.stored.push(event);
-      for (const [peer, subs] of this.subs) {
-        for (const [id, filters] of subs) {
-          if (filters.some((f) => matches(f, event))) peer.send(JSON.stringify(['EVENT', id, event]));
-        }
-      }
-    } else if (type === 'REQ') {
-      const id = String(rest[0]);
-      const filters = rest.slice(1) as NostrFilter[];
-      this.subs.get(ws)?.set(id, filters);
-      for (const f of filters) {
-        let found = this.stored.filter((e) => matches(f, e)).sort((a, b) => b.created_at - a.created_at);
-        if (typeof f.limit === 'number') found = found.slice(0, f.limit);
-        for (const e of found) ws.send(JSON.stringify(['EVENT', id, e]));
-      }
-      ws.send(JSON.stringify(['EOSE', id]));
-    } else if (type === 'CLOSE') {
-      this.subs.get(ws)?.delete(String(rest[0]));
-    }
-  }
-}
-
-function matches(filter: NostrFilter, event: NostrEvent): boolean {
-  for (const [key, value] of Object.entries(filter)) {
-    if (key === 'ids' && !(value as string[]).some((v) => event.id.startsWith(v))) return false;
-    if (key === 'authors' && !(value as string[]).some((v) => event.pubkey.startsWith(v))) return false;
-    if (key === 'kinds' && !(value as number[]).includes(event.kind)) return false;
-    if (key === 'since' && event.created_at < (value as number)) return false;
-    if (key === 'until' && event.created_at > (value as number)) return false;
-    if (key.startsWith('#')) {
-      const name = key.slice(1);
-      const wanted = value as string[];
-      if (!event.tags.some((t) => t[0] === name && t[1] !== undefined && wanted.includes(t[1]))) return false;
-    }
-  }
-  return true;
-}
 
 /** True when at least one pinned relay accepts a WebSocket from this machine within 8 s. */
 async function relaysReachable(): Promise<boolean> {
@@ -623,25 +549,13 @@ async function main(): Promise<number> {
     const forceLocal = process.env.LIVE_RELAYS === 'local';
     const reachable = !forceLocal && (await relaysReachable());
     const relays = new Map<string, LocalRelay>();
-    const routeRelays = async (ctx: BrowserContext): Promise<void> => {
-      for (const url of RELAYS) {
-        await ctx.routeWebSocket(new RegExp(`^${url.replace(/[.]/g, '\\.')}/?$`), (ws) => {
-          let relay = relays.get(url);
-          if (!relay) {
-            relay = new LocalRelay();
-            relays.set(url, relay);
-          }
-          relay.attach(ws);
-        });
-      }
-    };
     console.log(`  live: ${reachable ? 'public Nostr relays' : 'in-process Nostr relay (public relays unreachable or LIVE_RELAYS=local)'}`);
     let guestContext: BrowserContext | null = null;
     try {
-      if (!reachable) await routeRelays(context);
+      if (!reachable) await routeRelays(context, relays);
       await cardMenu(page, WORD, 'Live session…');
       await dialog(page).getByRole('button', { name: 'Start' }).click();
-      await page.waitForURL(/\/live\.html#r=.+&k=.+&h=.+/, { timeout: 30_000 });
+      await page.waitForURL(/\/live\.html#r=.+&k=.+/, { timeout: 30_000 });
       // The library is not protected: the host goes straight to the session.
       const hostBar = page.locator('nav.live-bar');
       await hostBar.waitFor({ timeout: 120_000 });
@@ -650,9 +564,10 @@ async function main(): Promise<number> {
       await hostBar.getByText('Invite link copied.').waitFor({ timeout: 10_000 });
       const invite = await readClipboard(page);
       check.ok(/\/live\.html#r=[^&]+&k=[^&]+$/.test(invite), `invite link has room and key only (${invite.replace(/k=.*/, 'k=…')})`);
+      check.ok(page.url() === invite, 'the host\'s address bar shows the invite link, without the library id');
 
       guestContext = await newContext();
-      if (!reachable) await routeRelays(guestContext);
+      if (!reachable) await routeRelays(guestContext, relays);
       const guest = await guestContext.newPage();
       watch(guest);
       await guest.goto(invite);
@@ -673,8 +588,10 @@ async function main(): Promise<number> {
       await waitHome(guest);
       const liveText = await wordText(guest);
       check.ok(liveText.includes('Hello sealoffice live'), `guest's copy holds what the host typed live (${liveText})`);
-      check.ok(liveSockets.size > 0, `live pages connected to pinned relays only (${[...liveSockets].join(', ')})`);
-      if (!reachable) {
+      if (reachable) {
+        check.ok(liveSockets.size > 0, `live pages connected to pinned relays only (${[...liveSockets].join(', ')})`);
+      } else {
+        // Routed sockets raise no 'websocket' event: the relay's own count shows the pages reached it.
         const events = [...relays.values()].reduce((n, r) => n + r.events, 0);
         check.ok(events > 0, `in-process relay carried the signalling (${events} events)`);
       }

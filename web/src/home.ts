@@ -3,13 +3,13 @@
 // (search, sort, folders, grid or list), each with its ⋯ menu; the footer says
 // how the library is stored and protected.
 import type { BlankKind } from './editor';
-import type { DocActions } from './docactions';
+import { type DocActions, LIVE_PRIVACY } from './docactions';
 import type { ExportFormat } from './exporter';
 import { canOfficeProtect } from './exporter';
 import { fileIcon, icon } from './icons';
 import { ACCEPT } from './importer';
 import {
-  button, formatRelative, formatSize, h, type MenuItem, menuButton, pickLocalFiles, searchKey, select,
+  button, formatRelative, formatSize, h, type MenuItem, menuButton, modal, pickLocalFiles, searchKey, select,
 } from './ui';
 import type { DocEntry, Vault } from './vault';
 
@@ -50,6 +50,8 @@ export interface HomeHost {
   /** Whether this browser can run the editor (WebGPU or WebGL2). */
   graphics: boolean;
   create(kind: BlankKind): Promise<void>;
+  /** A blank document of `kind`, in the library, opened as the host of a new live session. */
+  createLive(kind: BlankKind): Promise<void>;
   open(entry: DocEntry): Promise<void>;
   settings(): Promise<void>;
   about(): Promise<void>;
@@ -171,7 +173,30 @@ export class Home {
       h('span', { class: 'muted small' }, 'Office or .age'));
     open.addEventListener('click', () => this.run(() => this.pickAndImport(true)));
     open.disabled = !this.host.graphics;
-    this.createRow.replaceChildren(...tiles, open);
+    const live = h('button', { type: 'button', class: 'tile live' },
+      h('span', { class: 'tile-glyph' }, icon('link', 30)),
+      h('span', {}, 'Shared document'),
+      h('span', { class: 'muted small' }, 'Edit together via a link'));
+    live.addEventListener('click', () => this.run(async () => {
+      const kind = await this.chooseLiveKind();
+      if (kind) await this.host.createLive(kind);
+    }));
+    live.disabled = !this.host.graphics;
+    this.createRow.replaceChildren(...tiles, open, live);
+  }
+
+  /** Which blank document to share live; null when cancelled. */
+  private chooseLiveKind(): Promise<BlankKind | null> {
+    const again = this.vault.isProtected ? ' You will unlock the library again.' : '';
+    return modal<BlankKind | null>('New shared document', (close, body) => {
+      body.append(
+        h('p', {}, 'A blank document opens in a live session, saved in your library. Its link shows in the address bar: ' +
+          'send it, and whoever types takes the pen once the other one pauses.'),
+        h('p', { class: 'muted small' }, `${LIVE_PRIVACY}${again}`),
+        h('div', { class: 'choices' }, ...NEW_KINDS.map(({ kind, label }) => button(label, () => close(kind)))),
+        h('div', { class: 'actions' }, button('Cancel', () => close(null))),
+      );
+    }, null);
   }
 
   /** Picks files and imports them; with `openOne`, a single imported file opens in the editor. */

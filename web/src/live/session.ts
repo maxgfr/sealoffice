@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // A live session: one peer at a time holds the pen and edits; each of its
 // saves is broadcast as an encrypted snapshot that the others load. The host
-// (who started the session) hands the pen over on request; before it moves,
-// the holder saves and broadcasts its last changes, so no edit is lost.
+// (who started the session) hands the pen over on request, or on its own when
+// someone starts typing while the holder has paused; before it moves, the
+// holder saves and broadcasts its last changes, so no edit is lost.
 import { type LiveMessage, openMessage, sealMessage, SnapshotOrder } from './protocol';
 import type { Transport } from './transport';
 
@@ -24,6 +25,8 @@ export interface SessionEvents {
   pen?(holder: string, mine: boolean): void;
   /** Host only: `peer` asks for the pen. */
   penRequest?(peer: string, name: string): void;
+  /** Typing did not get the pen: `holder` is still typing. */
+  penBusy?(holder: string): void;
   /** A newer snapshot arrived (applied to the editor already, when there is one and it is clean). */
   snapshot?(snapshot: Snapshot, applied: boolean): void;
   /** A message could not be read (altered, foreign key): it is dropped. */
@@ -41,9 +44,11 @@ export class LiveSession {
   private latestSnapshot: Snapshot | null = null;
   /** A snapshot not loaded because the editor had local changes. */
   private held: Snapshot | null = null;
-  /** Host: resolves the wait for the holder's 'pen-released'. */
-  private released: (() => void) | null = null;
+  /** Host: settles the wait for the holder's answer (true: released, false: busy). */
+  private released: ((free: boolean) => void) | null = null;
   private inbox: Promise<void> = Promise.resolve();
+  /** Host: pen moves, one at a time. */
+  private handovers: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly transport: Transport,
@@ -56,6 +61,10 @@ export class LiveSession {
       beforeRelease?: () => Promise<void>;
       /** How long the host waits for a holder that does not answer (left, disconnected). */
       releaseTimeoutMs?: number;
+      /** Typing takes the pen from a holder that has not typed for this long. */
+      idleMs?: number;
+      /** When this peer's user last typed into the document (ms since the epoch). */
+      lastInput?: () => number;
     },
   ) {
     this.hostId = options.host ? transport.selfId : '';
@@ -74,7 +83,7 @@ export class LiveSession {
     transport.onPeerLeave((peer) => {
       this.names.delete(peer);
       // A holder that left cannot release: stop waiting for it.
-      if (peer === this.penHolder) this.released?.();
+      if (peer === this.penHolder) this.released?.(true);
       this.emitPeers();
     });
   }
@@ -123,11 +132,19 @@ export class LiveSession {
     await this.send({ type: 'snapshot', seq: this.order.next(), name: snapshot.name, bytes: snapshot.bytes });
   }
 
-  /** Asks the host for the pen. */
-  async requestPen(): Promise<void> {
+  /**
+   * Asks for the pen. `auto`: this peer started typing, and the pen moves
+   * without the host's say-so if the holder has paused (see `idleMs`);
+   * otherwise the host is asked.
+   */
+  async requestPen(auto = false): Promise<void> {
     if (this.holdsPen) return;
+    if (this.options.host) {
+      if (auto) await this.autoGrant(this.transport.selfId);
+      return;
+    }
     if (!this.hostId) throw new Error('the host is not connected');
-    await this.send({ type: 'pen-request', name: this.options.name }, this.hostId);
+    await this.send({ type: 'pen-request', name: this.options.name, ...(auto ? { auto: true } : {}) }, this.hostId);
   }
 
   /**
@@ -137,29 +154,63 @@ export class LiveSession {
    */
   async grantPen(peer: string): Promise<void> {
     if (!this.options.host) throw new Error('only the host hands out the pen');
+    await this.serial(() => this.handOver(peer));
+  }
+
+  /** Host: `peer` started typing; the pen moves if its holder has paused, else `peer` hears it is busy. */
+  private autoGrant(peer: string): Promise<void> {
+    return this.serial(async () => {
+      const idleMs = this.options.idleMs;
+      const holder = this.penHolder;
+      if (idleMs !== undefined && (await this.handOver(peer, idleMs))) return;
+      if (peer === this.transport.selfId) {
+        this.options.events?.penBusy?.(holder);
+      } else {
+        await this.send({ type: 'pen-busy', holder }, peer);
+      }
+    });
+  }
+
+  /** Moves the pen to `peer`; with `ifIdleMs`, only if the holder has not typed for that long. Whether it moved. */
+  private async handOver(peer: string, ifIdleMs?: number): Promise<boolean> {
     const holder = this.penHolder;
-    if (holder === peer) return;
+    if (holder === peer) return true;
     if (holder === this.transport.selfId) {
+      if (ifIdleMs !== undefined && !this.idleFor(ifIdleMs)) return false;
       await this.options.beforeRelease?.();
-    } else if (this.names.has(holder)) {
-      await this.awaitRelease(holder);
+    } else if (this.names.has(holder) && !(await this.awaitRelease(holder, ifIdleMs))) {
+      return false;
     }
     this.setPen(peer);
     await this.send({ type: 'pen-grant', peer });
+    return true;
   }
 
-  private awaitRelease(holder: string): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
+  /** Host: runs pen moves one after the other. */
+  private serial<T>(move: () => Promise<T>): Promise<T> {
+    const run = this.handovers.then(move, move);
+    this.handovers = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Whether this peer's user has not typed for `ms`. */
+  private idleFor(ms: number): boolean {
+    return Date.now() - (this.options.lastInput?.() ?? 0) >= ms;
+  }
+
+  /** Asks `holder` to release the pen; false when it answers that it is busy typing. */
+  private awaitRelease(holder: string, ifIdleMs?: number): Promise<boolean> {
+    return new Promise<boolean>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.released = null;
-        resolve();
+        resolve(true);
       }, this.options.releaseTimeoutMs ?? 10_000);
-      this.released = () => {
+      this.released = (free) => {
         clearTimeout(timer);
         this.released = null;
-        resolve();
+        resolve(free);
       };
-      this.send({ type: 'pen-release' }, holder).catch((error: unknown) => {
+      this.send({ type: 'pen-release', ...(ifIdleMs === undefined ? {} : { ifIdleMs }) }, holder).catch((error: unknown) => {
         clearTimeout(timer);
         this.released = null;
         reject(error instanceof Error ? error : new Error(String(error)));
@@ -214,16 +265,34 @@ export class LiveSession {
         this.setPen(message.pen);
         return;
       case 'pen-request':
-        if (this.options.host) this.options.events?.penRequest?.(peer, message.name);
+        if (!this.options.host) return;
+        if (message.auto) {
+          // Not awaited: the holder's answer comes through this same inbox.
+          this.autoGrant(peer).catch((error: unknown) => this.report(error));
+        } else {
+          this.options.events?.penRequest?.(peer, message.name);
+        }
         return;
       case 'pen-grant':
         if (peer === this.hostId) this.setPen(message.peer);
         return;
       case 'pen-release':
-        if (peer === this.hostId && this.holdsPen) await this.release();
+        if (peer !== this.hostId || !this.holdsPen) return;
+        if (message.ifIdleMs !== undefined && !this.idleFor(message.ifIdleMs)) {
+          await this.send({ type: 'pen-busy', holder: this.transport.selfId }, this.hostId);
+        } else {
+          await this.release();
+        }
         return;
       case 'pen-released':
-        if (this.options.host && peer === this.penHolder) this.released?.();
+        if (this.options.host && peer === this.penHolder) this.released?.(true);
+        return;
+      case 'pen-busy':
+        if (this.options.host) {
+          if (peer === this.penHolder) this.released?.(false);
+        } else if (peer === this.hostId) {
+          this.options.events?.penBusy?.(message.holder);
+        }
         return;
       case 'snapshot':
         // Only the pen holder's snapshots count; the host also brings a new guest up to date.

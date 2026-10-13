@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Helpers shared by the end-to-end scripts: the dist/ server, the check list,
 // the home screen and editor, and reading a downloaded .docx.
-import { chromium, type Browser, type Locator, type Page } from 'playwright';
+import { chromium, type Browser, type BrowserContext, type Locator, type Page, type WebSocketRoute } from 'playwright';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { RELAYS } from '../../src/live/transport';
 
 export const DIST = resolve(import.meta.dir, '../../../dist');
 export const SHOTS = process.env.SHOTS ?? '';
@@ -143,4 +144,92 @@ export async function typeInEditor(page: Page, text: string): Promise<void> {
 
 export async function readClipboard(page: Page): Promise<string> {
   return page.evaluate(() => navigator.clipboard.readText());
+}
+
+/** A minimal NIP-01 relay in this process: EVENT / REQ / CLOSE / EOSE with fan-out. */
+interface NostrEvent {
+  id: string;
+  pubkey: string;
+  kind: number;
+  created_at: number;
+  tags: string[][];
+}
+type NostrFilter = Record<string, unknown>;
+
+export class LocalRelay {
+  private readonly stored: NostrEvent[] = [];
+  private readonly subs = new Map<WebSocketRoute, Map<string, NostrFilter[]>>();
+  events = 0;
+
+  attach(ws: WebSocketRoute): void {
+    this.subs.set(ws, new Map());
+    ws.onMessage((raw) => this.receive(ws, typeof raw === 'string' ? raw : raw.toString()));
+    ws.onClose(() => this.subs.delete(ws));
+  }
+
+  private receive(ws: WebSocketRoute, raw: string): void {
+    let msg: unknown;
+    try {
+      msg = JSON.parse(raw);
+    } catch {
+      ws.send(JSON.stringify(['NOTICE', 'invalid JSON']));
+      return;
+    }
+    if (!Array.isArray(msg)) return;
+    const [type, ...rest] = msg as [string, ...unknown[]];
+    if (type === 'EVENT') {
+      const event = rest[0] as NostrEvent;
+      this.events++;
+      ws.send(JSON.stringify(['OK', event.id, true, '']));
+      const ephemeral = event.kind >= 20000 && event.kind < 30000;
+      if (!ephemeral) this.stored.push(event);
+      for (const [peer, subs] of this.subs) {
+        for (const [id, filters] of subs) {
+          if (filters.some((f) => matches(f, event))) peer.send(JSON.stringify(['EVENT', id, event]));
+        }
+      }
+    } else if (type === 'REQ') {
+      const id = String(rest[0]);
+      const filters = rest.slice(1) as NostrFilter[];
+      this.subs.get(ws)?.set(id, filters);
+      for (const f of filters) {
+        let found = this.stored.filter((e) => matches(f, e)).sort((a, b) => b.created_at - a.created_at);
+        if (typeof f.limit === 'number') found = found.slice(0, f.limit);
+        for (const e of found) ws.send(JSON.stringify(['EVENT', id, e]));
+      }
+      ws.send(JSON.stringify(['EOSE', id]));
+    } else if (type === 'CLOSE') {
+      this.subs.get(ws)?.delete(String(rest[0]));
+    }
+  }
+}
+
+function matches(filter: NostrFilter, event: NostrEvent): boolean {
+  for (const [key, value] of Object.entries(filter)) {
+    if (key === 'ids' && !(value as string[]).some((v) => event.id.startsWith(v))) return false;
+    if (key === 'authors' && !(value as string[]).some((v) => event.pubkey.startsWith(v))) return false;
+    if (key === 'kinds' && !(value as number[]).includes(event.kind)) return false;
+    if (key === 'since' && event.created_at < (value as number)) return false;
+    if (key === 'until' && event.created_at > (value as number)) return false;
+    if (key.startsWith('#')) {
+      const name = key.slice(1);
+      const wanted = value as string[];
+      if (!event.tags.some((t) => t[0] === name && t[1] !== undefined && wanted.includes(t[1]))) return false;
+    }
+  }
+  return true;
+}
+
+/** Routes the pinned relays of `context` to in-process relays, one per URL, kept in `relays`. */
+export async function routeRelays(context: BrowserContext, relays: Map<string, LocalRelay>): Promise<void> {
+  for (const url of RELAYS) {
+    await context.routeWebSocket(new RegExp(`^${url.replace(/[.]/g, '\\.')}/?$`), (ws) => {
+      let relay = relays.get(url);
+      if (!relay) {
+        relay = new LocalRelay();
+        relays.set(url, relay);
+      }
+      relay.attach(ws);
+    });
+  }
 }

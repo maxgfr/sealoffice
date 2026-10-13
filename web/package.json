@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit -p .",
     "test": "bun test",
     "test:e2e": "bun test/e2e/smoke.ts",
-    "test:e2e:word": "bun test/e2e/word.ts"
+    "test:e2e:word": "bun test/e2e/word.ts",
+    "test:e2e:live": "bun test/e2e/live.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

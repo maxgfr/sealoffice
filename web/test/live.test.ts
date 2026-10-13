@@ -3,11 +3,15 @@ import { describe, expect, test } from 'bun:test';
 import { importSessionKey, newSessionSecrets, openMessage, sealMessage, SnapshotOrder } from '../src/live/protocol';
 import { type LiveEditor, LiveSession, type SessionEvents } from '../src/live/session';
 import { MemoryHub, RELAYS } from '../src/live/transport';
-import { keyGoesToEditor } from '../src/live/ui';
+import { editsText, keyGoesToEditor, parseLiveLink } from '../src/live/ui';
 
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 const text = (data: Uint8Array): string => new TextDecoder().decode(data);
 const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 20));
+const IDLE_MS = 1000;
+/** A user who typed long ago, or just now. */
+const paused = (): number => Date.now() - 60_000;
+const typing = (): number => Date.now();
 
 class FakeEditor implements LiveEditor {
   dirty = false;
@@ -25,6 +29,9 @@ async function pair(events: {
   guest?: SessionEvents;
   guestRelease?: (guest: () => LiveSession) => () => Promise<void>;
   releaseTimeoutMs?: number;
+  /** When each one's user last typed; both take the pen by typing after 1 s of pause. */
+  hostTyped?: () => number;
+  guestTyped?: () => number;
 } = {}): Promise<{
   hub: MemoryHub; key: CryptoKey; host: LiveSession; guest: LiveSession; guestEditor: FakeEditor;
 }> {
@@ -32,11 +39,13 @@ async function pair(events: {
   const key = await importSessionKey(newSessionSecrets().key);
   const host = new LiveSession(hub.join(), key, {
     host: true, name: 'Host', events: events.host, ...(events.releaseTimeoutMs === undefined ? {} : { releaseTimeoutMs: events.releaseTimeoutMs }),
+    ...(events.hostTyped ? { idleMs: IDLE_MS, lastInput: events.hostTyped } : {}),
   });
   host.setInitial({ name: 'a.docx', bytes: bytes('v1') });
   const release = events.guestRelease?.(() => guest);
   const guest: LiveSession = new LiveSession(hub.join(), key, {
     host: false, name: 'Guest', events: events.guest, ...(release ? { beforeRelease: release } : {}),
+    ...(events.guestTyped ? { idleMs: IDLE_MS, lastInput: events.guestTyped } : {}),
   });
   const guestEditor = new FakeEditor();
   guest.attachEditor(guestEditor);
@@ -66,6 +75,21 @@ describe('live protocol', () => {
     await expect(importSessionKey('c2hvcnQ')).rejects.toThrow('damaged');
   });
 
+  test('auto requests, conditional releases and busy answers round trip; bad ones are refused', async () => {
+    const key = await importSessionKey(newSessionSecrets().key);
+    for (const m of [
+      { type: 'pen-request', name: 'G', auto: true },
+      { type: 'pen-release', ifIdleMs: 5000 },
+      { type: 'pen-release' },
+      { type: 'pen-busy', holder: 'peer' },
+    ] as const) {
+      expect(await openMessage(key, await sealMessage(key, m))).toEqual(m);
+    }
+    for (const bad of [{ type: 'pen-request', name: 'G', auto: 'yes' }, { type: 'pen-release', ifIdleMs: -1 }, { type: 'pen-busy' }]) {
+      await expect(openMessage(key, await sealMessage(key, bad as never))).rejects.toThrow('malformed');
+    }
+  });
+
   test('snapshot order only moves forward', () => {
     const order = new SnapshotOrder();
     expect(order.accept(2)).toBe(true);
@@ -85,7 +109,26 @@ describe('live protocol', () => {
   });
 });
 
+describe('live link', () => {
+  test('the host document comes from the link, else from what this tab remembers for the room', () => {
+    expect(parseLiveLink('#r=room&k=key&h=doc')).toEqual({ room: 'room', key: 'key', hostDoc: 'doc' });
+    expect(parseLiveLink('#r=room&k=key')).toEqual({ room: 'room', key: 'key', hostDoc: null });
+    const remembered = (room: string): string | null => (room === 'room' ? 'kept' : null);
+    expect(parseLiveLink('#r=room&k=key', remembered)?.hostDoc).toBe('kept');
+    expect(parseLiveLink('#r=other&k=key', remembered)?.hostDoc).toBeNull();
+    expect(parseLiveLink('#r=room')).toBeNull();
+  });
+});
+
 describe('input shield', () => {
+  test('only keys that change the text ask for the pen', () => {
+    const key = (k: string, mods: { metaKey?: boolean; ctrlKey?: boolean } = {}) => ({ key: k, metaKey: false, ctrlKey: false, ...mods });
+    for (const k of ['a', 'Z', ' ', 'é', 'Enter', 'Backspace', 'Delete', 'Tab', 'Process']) expect(editsText(key(k))).toBe(true);
+    for (const k of ['ArrowLeft', 'Shift', 'Escape', 'PageDown', 'F5']) expect(editsText(key(k))).toBe(false);
+    expect(editsText(key('c', { metaKey: true }))).toBe(false);
+    expect(editsText(key('v', { ctrlKey: true }))).toBe(false);
+  });
+
   /** An element inside the containers matching `inside` (comma lists like Element.closest). */
   const element = (inside: string[]): { closest(selectors: string): unknown } => ({
     closest: (selectors) => (selectors.split(',').map((x) => x.trim()).some((x) => inside.includes(x)) ? {} : null),
@@ -208,6 +251,64 @@ describe('live session', () => {
     const started = Date.now();
     await host.grantPen(host.selfId);
     expect(Date.now() - started).toBeGreaterThanOrEqual(25);
+    expect(host.holdsPen).toBe(true);
+  });
+
+  test('typing takes the pen from a host that has paused, without asking it', async () => {
+    const requests: string[] = [];
+    const { host, guest } = await pair({ host: { penRequest: (peer) => requests.push(peer) }, hostTyped: paused, guestTyped: paused });
+    await guest.requestPen(true);
+    await settle();
+    expect(guest.holdsPen).toBe(true);
+    expect(host.holdsPen).toBe(false);
+    expect(requests).toEqual([]);
+  });
+
+  test('typing does not take the pen from a host that is typing: the guest hears it is busy', async () => {
+    const busy: string[] = [];
+    const { host, guest } = await pair({ guest: { penBusy: (holder) => busy.push(holder) }, hostTyped: typing, guestTyped: paused });
+    await guest.requestPen(true);
+    await settle();
+    expect(host.holdsPen).toBe(true);
+    expect(guest.holdsPen).toBe(false);
+    expect(busy).toEqual([host.selfId]);
+  });
+
+  test('the host takes the pen back by typing once the guest has paused; the guest\'s last edits go out first', async () => {
+    const log: string[] = [];
+    const { host, guest } = await pair({
+      host: { snapshot: (s) => log.push(`host got ${text(s.bytes)}`) },
+      guestRelease: (self) => async () => {
+        await self().publish({ name: 'a.docx', bytes: bytes('guest edits') });
+      },
+      hostTyped: paused,
+      guestTyped: paused,
+    });
+    await host.grantPen(guest.selfId);
+    await settle();
+    await host.requestPen(true);
+    await settle();
+    expect(host.holdsPen).toBe(true);
+    expect(guest.holdsPen).toBe(false);
+    expect(log).toEqual(['host got guest edits']);
+  });
+
+  test('a guest that is typing keeps the pen when the host types', async () => {
+    const busy: string[] = [];
+    const { host, guest } = await pair({ host: { penBusy: (holder) => busy.push(holder) }, hostTyped: paused, guestTyped: typing });
+    await host.grantPen(guest.selfId);
+    await settle();
+    await host.requestPen(true);
+    await settle();
+    expect(guest.holdsPen).toBe(true);
+    expect(host.holdsPen).toBe(false);
+    expect(busy).toEqual([guest.selfId]);
+  });
+
+  test('without an idle time, typing never moves the pen', async () => {
+    const { host, guest } = await pair();
+    await guest.requestPen(true);
+    await settle();
     expect(host.holdsPen).toBe(true);
   });
 

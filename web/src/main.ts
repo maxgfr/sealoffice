@@ -5,7 +5,7 @@ import { buildInfo, showAbout } from './about';
 import { AppBar } from './appbar';
 import { Bridge, focusEditor } from './bridge';
 import { loadCrypto, type SealCrypto } from './crypto';
-import { DocActions, withExtension } from './docactions';
+import { DocActions, hostLive, withExtension } from './docactions';
 import { assetBase, type BlankKind, loadEditor, type EditorModule } from './editor';
 import { Autosaver } from './autosave';
 import { Home, NEW_KINDS } from './home';
@@ -238,6 +238,7 @@ async function boot(root: HTMLElement): Promise<void> {
   const home: Home = new Home(vault, actions, {
     graphics,
     create: (kind) => createDoc(kind),
+    createLive: (kind) => createLiveDoc(kind),
     open: (entry) => openEntry(entry),
     settings: () => settingsDialog(vault, actions, { changed }),
     about: showAbout,
@@ -323,6 +324,14 @@ async function boot(root: HTMLElement): Promise<void> {
     const bytes = editor.blank_file(kind);
     const entry = await vault.write(vault.uniqueName(base), bytes);
     await openInEditor({ id: entry.id, name: entry.name, bytes });
+  }
+  /** A blank document, stored in the library under a free name, then hosted in a new live session. */
+  async function createLiveDoc(kind: BlankKind): Promise<void> {
+    const editor = await editorLoad;
+    if (!(await actions.saveOpenDoc('Create'))) return;
+    const base = NEW_KINDS.find((k) => k.kind === kind)?.name ?? `Document.${kind}`;
+    const entry = await vault.write(vault.uniqueName(base), editor.blank_file(kind));
+    hostLive(entry.id);
   }
   /** Renames the open document: saved first, then shown again under its new name (the editor saves by name). */
   async function renameOpen(entry: DocEntry, name: string): Promise<void> {

@@ -13,6 +13,12 @@ import { joinTrystero } from './transport';
 
 /** The pen holder saves this often while editing. */
 const LIVE_AUTOSAVE_MS = 3000;
+/** Typing takes the pen from a holder that has not typed for this long. */
+const AUTO_PEN_IDLE_MS = 5000;
+/** Typing while someone else holds the pen asks for it at most this often. */
+const AUTO_PEN_RETRY_MS = 1500;
+/** sessionStorage: the host's document of room `<room>`, once the address bar shows the invite link. */
+const HOST_DOC_KEY = 'sealoffice-live-host:';
 
 export interface LiveDeps {
   graphics: boolean;
@@ -27,20 +33,55 @@ interface LiveLink {
   hostDoc: string | null;
 }
 
-export function parseLiveLink(hash: string): LiveLink | null {
+/** A live link's parts; without `h`, the host document `remembered` for the room, if any. */
+export function parseLiveLink(hash: string, remembered: (room: string) => string | null = () => null): LiveLink | null {
   const params = new URLSearchParams(hash.replace(/^#/, ''));
   const room = params.get('r');
   const key = params.get('k');
   if (!room || !key) return null;
-  return { room, key, hostDoc: params.get('h') };
+  return { room, key, hostDoc: params.get('h') ?? remembered(room) };
+}
+
+/** The host document this tab started room `room` with (a reload keeps it; another tab does not). */
+function rememberedHostDoc(room: string): string | null {
+  try {
+    return sessionStorage.getItem(HOST_DOC_KEY + room);
+  } catch {
+    return null;
+  }
+}
+
+function rememberHostDoc(room: string, id: string | null): void {
+  try {
+    if (id === null) {
+      sessionStorage.removeItem(HOST_DOC_KEY + room);
+    } else {
+      sessionStorage.setItem(HOST_DOC_KEY + room, id);
+    }
+  } catch {
+    // Storage blocked: a reload of this page joins as a guest.
+  }
+}
+
+/** Whether a key pressed in the document changes its text (typing, Enter, deleting), not a shortcut or a move. */
+export function editsText(event: { key: string; metaKey: boolean; ctrlKey: boolean }): boolean {
+  if (event.metaKey || event.ctrlKey) return false;
+  return event.key.length === 1 || ['Enter', 'Backspace', 'Delete', 'Tab', 'Process'].includes(event.key);
 }
 
 export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void> {
-  const link = parseLiveLink(location.hash);
+  const link = parseLiveLink(location.hash, rememberedHostDoc);
   if (!link) throw new Error('this live session link is incomplete');
   if (!deps.graphics) throw new Error('editing is unavailable in this browser: it has neither WebGPU nor WebGL2');
   const key = await importSessionKey(link.key);
   const invite = new URL(`live.html#r=${link.room}&k=${link.key}`, location.href).href;
+  // The host's address bar shows the invite link, ready to share; this tab
+  // remembers it is the host, so a reload still is.
+  const justStarted = new URLSearchParams(location.hash.replace(/^#/, '')).has('h');
+  if (link.hostDoc) {
+    rememberHostDoc(link.room, link.hostDoc);
+    history.replaceState(null, '', invite);
+  }
 
   let host: { vault: Vault; id: string; name: string } | null = null;
   let initial: Snapshot | null = null;
@@ -64,6 +105,8 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
   const signal = new SaveSignal();
   let editor: EditorModule | null = null;
   let autosaver: Autosaver | null = null;
+  /** When this user last typed into the document while holding the pen. */
+  let lastInput = 0;
   const firstSnapshot = new Promise<Snapshot>((resolve) => {
     if (initial) resolve(initial);
     bar.firstSnapshot = resolve;
@@ -72,6 +115,8 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
   const session: LiveSession = new LiveSession(transport, key, {
     host: host !== null,
     name: host ? 'Host' : 'Guest',
+    idleMs: AUTO_PEN_IDLE_MS,
+    lastInput: () => lastInput,
     // The last edits go out as a snapshot before the pen moves.
     beforeRelease: async () => {
       if (!autosaver) return;
@@ -83,6 +128,7 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
       pen: (holder, mine) => {
         bar.showPen(mine, holder === '' ? 'Nobody' : (bar.names.get(holder) ?? 'Another participant'));
         shield.hidden = mine;
+        bar.note(mine ? '' : 'Start typing to take the pen once they pause.');
         if (!autosaver) return;
         if (mine) {
           autosaver.start(bar.reportError, LIVE_AUTOSAVE_MS);
@@ -90,6 +136,7 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
           autosaver.stop();
         }
       },
+      penBusy: (holder) => bar.note(`${bar.names.get(holder) ?? 'Another participant'} is typing: the pen moves when they pause.`),
       penRequest: (peer, name) => {
         void confirm('Pen requested', `${name} asks to edit. Hand over the pen?`, 'Hand over').then(async (yes) => {
           if (yes) await session.grantPen(peer);
@@ -127,7 +174,17 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
     return null;
   };
 
-  const shield = inputShield(() => !session.holdsPen);
+  // Typing while someone else holds the pen asks for it: it moves at once if they have paused.
+  let askedAt = 0;
+  const shield = inputShield(() => !session.holdsPen, () => {
+    if (Date.now() - askedAt < AUTO_PEN_RETRY_MS) return;
+    askedAt = Date.now();
+    bar.note('Asking for the pen…');
+    session.requestPen(true).catch(bar.reportError);
+  });
+  window.addEventListener('keydown', (event) => {
+    if (session.holdsPen && editsText(event) && keyGoesToEditor(event.target instanceof Element ? event.target : null)) lastInput = Date.now();
+  }, { capture: true });
   bar.onRequestPen = () => session.requestPen().then(() => bar.note('Request sent to the host.'), bar.reportError);
   bar.onTakePen = () => session.grantPen(transport.selfId).catch(bar.reportError);
   bar.onLoadPending = () => {
@@ -136,6 +193,7 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
   };
   bar.onSaveCopy = () => saveCopy(session.latest, deps).catch(bar.reportError);
   bar.onLeave = () => {
+    if (host) rememberHostDoc(link.room, null);
     session.leave().then(() => location.assign(new URL('./', location.href).href), bar.reportError);
   };
 
@@ -151,6 +209,12 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
   if (session.holdsPen) autosaver.start(bar.reportError, LIVE_AUTOSAVE_MS);
   shield.hidden = session.holdsPen;
   document.body.append(shield, bar.el);
+  if (host && justStarted) {
+    navigator.clipboard.writeText(invite).then(
+      () => bar.note('Invite link copied: send it to edit together.'),
+      () => bar.note('Send the link in the address bar to edit together.'),
+    );
+  }
   window.addEventListener('beforeunload', (event) => {
     if (session.holdsPen && autosaver?.dirty) event.preventDefault();
   });
@@ -202,9 +266,10 @@ export function keyGoesToEditor(target: { closest(selectors: string): unknown } 
 
 /**
  * Covers the editor while someone else holds the pen: clicks and keys are
- * blocked, the wheel is passed on so the document still scrolls.
+ * blocked, the wheel is passed on so the document still scrolls. A blocked
+ * key that would change the text calls `typed`.
  */
-function inputShield(blocking: () => boolean): HTMLElement {
+function inputShield(blocking: () => boolean, typed: () => void): HTMLElement {
   const shield = h('div', { 'aria-hidden': 'true' });
   Object.assign(shield.style, { position: 'fixed', inset: '0', zIndex: String(SHIELD_Z), background: 'transparent', cursor: 'not-allowed' });
   shield.addEventListener('wheel', (event) => {
@@ -215,6 +280,7 @@ function inputShield(blocking: () => boolean): HTMLElement {
     if (!blocking() || !keyGoesToEditor(event.target instanceof Element ? event.target : null)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
+    if (editsText(event)) typed();
   }, { capture: true });
   return shield;
 }

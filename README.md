@@ -30,8 +30,11 @@ Powered by [ibisOffice](https://github.com/ibisjp/ibis-office).
   and Edge only).
 - Shares a document as an encrypted link, with the key in the link or sent
   separately.
-- Live sessions (`live.html`): edit a document with others, peer to peer. One
-  person holds the "pen" and edits; the others follow.
+- Live sessions (`live.html`): edit a document with others, peer to peer.
+  "Shared document" on the home screen starts one on a blank document; its
+  invite link is in the address bar (and copied). One person holds the "pen"
+  and edits, the others follow; typing takes the pen once the one editing
+  has paused for 5 seconds.
 - Without WebGPU or WebGL2 the editor cannot run; the page then opens without
   editing (import, export, backup).
 - PDF export and printing are not available.
