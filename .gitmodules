@@ -1,0 +1,3 @@
+[submodule "vendor/ibis-office"]
+	path = vendor/ibis-office
+	url = https://github.com/ibisjp/ibis-office

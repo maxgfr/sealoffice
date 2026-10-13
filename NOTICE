@@ -1,0 +1,17 @@
+sealoffice
+Copyright (c) 2026 maxgfr
+
+sealoffice is licensed under AGPL-3.0-only (see LICENSE).
+
+It includes ibisOffice (vendor/ibis-office), Copyright (c) ibis inc.,
+licensed under AGPL-3.0-only with additional terms under AGPL-3.0
+section 7(b). Those terms require derivatives to display
+"Powered by ibisOffice" with a link to https://github.com/ibisjp/ibis-office
+in their user interface. sealoffice does so. The full upstream notice is in
+vendor/ibis-office/NOTICE and applies to the ibisOffice code.
+
+The ibisOffice name and logo are trademarks of ibis inc. sealoffice is not
+affiliated with or endorsed by ibis inc.
+
+Third-party licenses of the editor's dependencies are listed in
+vendor/ibis-office/www/license.md (shipped as third-party-licenses.md).

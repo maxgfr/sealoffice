@@ -1,0 +1,3 @@
+[test]
+# Every vault operation runs scrypt, tuned to take about a second.
+timeout = 120000

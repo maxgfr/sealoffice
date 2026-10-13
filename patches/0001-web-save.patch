@@ -1,0 +1,187 @@
+diff --git a/crates/ibis-office-app/src/lib.rs b/crates/ibis-office-app/src/lib.rs
+index 75be011..6a1c066 100644
+--- a/crates/ibis-office-app/src/lib.rs
++++ b/crates/ibis-office-app/src/lib.rs
+@@ -919,11 +919,19 @@ mod web {
+     /// cannot be read) the editor shows the start view.
+     #[wasm_bindgen]
+     pub fn run(asset_base: Option<String>, file_name: Option<String>, file: Option<Vec<u8>>) -> Result<(), JsValue> {
+-        let document = file.and_then(|data| match ibis_pptx::read(&data) {
+-            Ok(presentation) => Some((presentation, file_name.unwrap_or_default().into())),
++        // Opened with its source, so it can be saved; read only if that fails.
++        let name: SharedString = file_name.unwrap_or_default().into();
++        let document = file.and_then(|data| match ibis_pptx::open(data.clone()) {
++            Ok(opened) => Some((opened.presentation, Some(Arc::new(opened.source)))),
+             Err(err) => {
+                 log::error!("{err}");
+-                None
++                match ibis_pptx::read(&data) {
++                    Ok(presentation) => Some((presentation, None)),
++                    Err(err) => {
++                        log::error!("{err}");
++                        None
++                    }
++                }
+             }
+         });
+         gpui_kit::platform::web_init();
+@@ -957,7 +965,12 @@ mod web {
+                 .expect("failed to load the UI font");
+             super::init(cx);
+             Theme::global_mut(cx).font_family = "IBM Plex Sans".into();
+-            super::open_editor(document, None, cx);
++            super::open_window_with(cx, move |editor, window, cx| {
++                if let Some((presentation, source)) = document {
++                    editor.load(presentation, name, window, cx);
++                    editor.source = source;
++                }
++            });
+         });
+         APPLICATION.with(|app| *app.borrow_mut() = Some(handle));
+         Ok(())
+@@ -983,6 +996,36 @@ mod web {
+         /// resolves to `{ name, bytes }`, or to `null` when cancelled.
+         #[wasm_bindgen(catch, js_name = ibisOfficePickFile)]
+         fn pick_file_js() -> Result<js_sys::Promise, JsValue>;
++
++        /// Defined by the page: stores `bytes` as the file `name` (asking for
++        /// a new name when `save_as`) and resolves to the name it was stored
++        /// under, or to `null` when cancelled.
++        #[wasm_bindgen(catch, js_name = ibisOfficeSaveFile)]
++        fn save_file_js(name: &str, bytes: &[u8], save_as: bool) -> Result<js_sys::Promise, JsValue>;
++    }
++
++    /// A new empty file of `kind` (`docx`, `xlsx` or `pptx`).
++    #[wasm_bindgen]
++    pub fn blank_file(kind: &str) -> Result<Vec<u8>, JsValue> {
++        let kind = match kind {
++            "docx" => ibis_pptx::Kind::Document,
++            "xlsx" => ibis_pptx::Kind::Workbook,
++            "pptx" => ibis_pptx::Kind::Presentation,
++            _ => return Err(js_sys::Error::new(&format!("unknown kind: {kind}")).into()),
++        };
++        ibis_pptx::blank_file(kind).map_err(|e| js_sys::Error::new(&e.to_string()).into())
++    }
++
++    /// Hand the page a saved file; the name it was stored under, or `None` if cancelled.
++    pub(crate) async fn save_file(name: String, bytes: Vec<u8>, save_as: bool) -> Result<Option<String>, String> {
++        let describe = |err: JsValue| {
++            err.as_string()
++                .or_else(|| err.dyn_ref::<js_sys::Error>().map(|e| String::from(e.message())))
++                .unwrap_or_else(|| format!("{err:?}"))
++        };
++        let promise = save_file_js(&name, &bytes, save_as).map_err(describe)?;
++        let value = wasm_bindgen_futures::JsFuture::from(promise).await.map_err(describe)?;
++        Ok(value.as_string())
+     }
+ 
+     /// Let the user choose a file; its name and contents, or `None` if cancelled.
+diff --git a/crates/ibis-office-app/src/shell/save.rs b/crates/ibis-office-app/src/shell/save.rs
+index 8698efe..3504008 100644
+--- a/crates/ibis-office-app/src/shell/save.rs
++++ b/crates/ibis-office-app/src/shell/save.rs
+@@ -29,11 +29,7 @@ impl SlideEditor {
+             None => self.save_as(&SaveAs, window, cx),
+         }
+         #[cfg(target_family = "wasm")]
+-        {
+-            let _ = window;
+-            self.status = Some(crate::shell::i18n::text("_shell.saving-is-not-yet-available-in-the-browser-versi").into());
+-            cx.notify();
+-        }
++        self.save_web(false, window, cx);
+     }
+ 
+     /// ⌘⇧S: ask where, and save there.
+@@ -70,21 +66,49 @@ impl SlideEditor {
+             .detach();
+         }
+         #[cfg(target_family = "wasm")]
+-        {
+-            let _ = window;
+-            self.status = Some(crate::shell::i18n::text("_shell.saving-is-not-yet-available-in-the-browser-versi").into());
+-            cx.notify();
+-        }
++        self.save_web(true, window, cx);
+     }
+ 
+-    /// Save to `path`, and make it the file's path.
+-    #[cfg(not(target_family = "wasm"))]
+-    pub(crate) fn save_to(&mut self, path: std::path::PathBuf, window: &mut Window) -> Result<(), String> {
++    /// In the browser: the file's bytes handed to the page (`ibisOfficeSaveFile`),
++    /// which stores them and answers the name they were stored under.
++    #[cfg(target_family = "wasm")]
++    fn save_web(&mut self, save_as: bool, window: &mut Window, cx: &mut Context<Self>) {
++        let name = match (&self.source, &self.file_name) {
++            (Some(_), Some(name)) => name.to_string(),
++            _ => {
++                self.status = Some(crate::shell::i18n::text("_shell.saving-new-documents-is-not-yet-supported").into());
++                return cx.notify();
++            }
++        };
++        let bytes = match self.save_bytes(&name) {
++            Ok(bytes) => bytes,
++            Err(err) => return self.report_save(Err(err), cx),
++        };
++        cx.spawn_in(window, async move |this, cx| {
++            let result = crate::web::save_file(name, bytes, save_as).await;
++            this.update_in(cx, |this, window, cx| match result {
++                Ok(Some(name)) => {
++                    let name: SharedString = name.into();
++                    window.set_window_title(&format!("{name} - ibisOffice"));
++                    this.file_name = Some(name);
++                    this.report_save(Ok(()), cx);
++                }
++                Ok(None) => {}
++                Err(err) => this.report_save(Err(err), cx),
++            })
++            .ok();
++        })
++        .detach();
++    }
++
++    /// The file's bytes, in the format `name`'s extension names.
++    pub(crate) fn save_bytes(&mut self, name: &str) -> Result<Vec<u8>, String> {
+         // The master view is closed first: what is saved is the file, with what was made in it.
+         if self.is_master_view() || self.is_page_view() {
+             return Err(crate::shell::i18n::text("_shell.close-slide-master-view-and-notes-formatting-bef").to_string());
+         }
+         let source = self.source.clone().ok_or(crate::shell::i18n::text("_shell.saving-new-documents-is-not-yet-supported").to_string())?;
++        let path = std::path::Path::new(name);
+         // A workbook saved as .csv: the sheet shown, as CSV (Excel's 「CSV UTF-8」).
+         let csv = self.is_workbook() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv"));
+         let tsv = self.is_workbook() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("tsv") || e.eq_ignore_ascii_case("tab") || e.eq_ignore_ascii_case("txt"));
+@@ -93,7 +117,7 @@ impl SlideEditor {
+         let potx = self.is_presentation() && path.extension().and_then(|e| e.to_str()).is_some_and(ibis_pptx::is_template);
+         let dotx = self.is_document() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("dotx") || e.eq_ignore_ascii_case("dotm"));
+         let pptx = self.is_presentation() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pptx") || e.eq_ignore_ascii_case("pptm"));
+-        let bytes = if csv {
++        Ok(if csv {
+             let index = self.presentation().slide_index(self.current_slide).unwrap_or(0);
+             ibis_pptx::csv::sheet_to_csv(self.presentation(), index)
+         } else if tsv {
+@@ -107,7 +131,15 @@ impl SlideEditor {
+             source.save_presentation(self.presentation(), ibis_pptx::SaveOptions::default()).map_err(|e| e.to_string())?
+         } else {
+             source.save(self.presentation(), ibis_pptx::SaveOptions::default()).map_err(|e| e.to_string())?
+-        };
++        })
++    }
++
++    /// Save to `path`, and make it the file's path.
++    #[cfg(not(target_family = "wasm"))]
++    pub(crate) fn save_to(&mut self, path: std::path::PathBuf, window: &mut Window) -> Result<(), String> {
++        let bytes = self.save_bytes(&path.to_string_lossy())?;
++        let csv = self.is_workbook() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv"));
++        let tsv = self.is_workbook() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("tsv") || e.eq_ignore_ascii_case("tab") || e.eq_ignore_ascii_case("txt"));
+         if self.is_workbook() {
+             let override_opt = self.sheet_state().and_then(|s| s.always_create_backup);
+             if let Ok(Some(backup_path)) = crate::xlsx::backup_save::create_backup_copy_if_enabled(&path, override_opt) {
+@@ -129,7 +161,6 @@ impl SlideEditor {
+         Ok(())
+     }
+ 
+-    #[cfg(not(target_family = "wasm"))]
+     fn report_save(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
+         self.status = Some(match result {
+             Ok(()) => crate::shell::i18n::text("_shell.saved").into(),
