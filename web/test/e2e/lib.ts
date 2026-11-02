@@ -96,6 +96,17 @@ export const home = (page: Page): Locator => page.locator('.home');
 export const card = (page: Page, name: string): Locator => page.locator('.doc-card').filter({ has: page.getByRole('button', { name: `Open ${name}`, exact: true }) });
 export const appbar = (page: Page): Locator => page.locator('nav.appbar');
 
+/**
+ * First launch: the "Protect your library" screen, left through the explicit
+ * opt-out (warning acknowledged) for tests that need an unprotected library.
+ */
+export async function startUnprotected(page: Page): Promise<void> {
+  await page.getByRole('heading', { name: 'Protect your library' }).waitFor({ timeout: 60_000 });
+  await page.getByRole('button', { name: 'Continue without protection…' }).click();
+  await dialog(page).getByRole('checkbox').check();
+  await dialog(page).getByRole('button', { name: 'Continue without protection', exact: true }).click();
+}
+
 /** Home screen shown, editor downloaded. */
 export async function waitHome(page: Page): Promise<void> {
   await home(page).waitFor({ timeout: 60_000 });

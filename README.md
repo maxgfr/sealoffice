@@ -39,15 +39,17 @@ Powered by [ibisOffice](https://github.com/ibisjp/ibis-office).
   editing (import, export, backup).
 - PDF export and printing are not available.
 
-## Encryption, three optional levels
+## Encryption, three levels
 
-Nothing asks for a passphrase by default. Encryption is there when you want it:
-
-1. **The whole library.** Settings → Protect sets a passphrase for every
-   document. The library then opens on a lock screen, and you get a recovery
-   key, `sealoffice-recovery-key.txt`, that opens it without the passphrase.
-   You can also unlock with a passkey (WebAuthn PRF), if your browser and
-   authenticator support it. Protection can be turned off again in Settings.
+1. **The whole library, by default.** The first launch asks for a passphrase
+   that protects every document. The library then opens on a lock screen,
+   and you get a recovery key, `sealoffice-recovery-key.txt`, that opens it
+   without the passphrase. You can also unlock with a passkey (WebAuthn PRF),
+   added in Settings, if your browser and authenticator support it. Starting
+   unprotected is possible, but only through "Continue without protection…"
+   and an acknowledged warning; an unprotected library then shows a banner
+   on the home screen, once per session, with "Protect this library".
+   Protection can be turned off again in Settings, after the same warning.
 2. **One document.** A padlock on a document gives it its own passphrase, on
    top of the library. There is no recovery: forget that passphrase and the
    document is lost.
@@ -56,9 +58,9 @@ Nothing asks for a passphrase by default. Encryption is there when you want it:
 
 ## Security model
 
-- **Unprotected library (the default).** Documents and the index are still
-  stored as age ciphertext, but the library key sits in the clear next to
-  them (`identity.key`). Anyone who can use this browser profile, or read its
+- **Unprotected library (an explicit opt-out).** Documents and the index are
+  still stored as age ciphertext, but the library key sits in the clear next
+  to them (`identity.key`). Anyone who can use this browser profile, or read its
   files, can open your documents. This keeps casual inspection of the storage
   from showing plain files; it is not protection against someone with access
   to your computer.

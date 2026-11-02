@@ -10,7 +10,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   Check, DIST, SHOTS, WORD, docxXml, downloadOriginal, editorShown, goHome, hasWebGpu, launch, readClipboard, serve, shot,
-  typeInEditor, waitHome,
+  startUnprotected, typeInEditor, waitHome,
 } from './lib';
 
 const MAC = process.platform === 'darwin';
@@ -250,6 +250,7 @@ async function main(): Promise<number> {
     if (!gpu) return 1;
     console.log(`  keys: ${MAC ? 'Mac (⌘, ⌥)' : 'Ctrl'}`);
 
+    await startUnprotected(page);
     await waitHome(page);
     await page.getByRole('button', { name: 'Word document', exact: true }).click();
     await editorShown(page);

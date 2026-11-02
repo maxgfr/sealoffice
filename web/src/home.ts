@@ -11,6 +11,7 @@ import { ACCEPT } from './importer';
 import {
   button, formatRelative, formatSize, h, type MenuItem, menuButton, modal, pickLocalFiles, searchKey, select,
 } from './ui';
+import { dismissProtectBanner, sharedOriginRisk, showProtectBanner } from './protection';
 import type { DocEntry, Vault } from './vault';
 
 /** The three blank documents, with the name each new one starts from. */
@@ -68,6 +69,8 @@ export class Home {
   private readonly docs = h('div', { class: 'docs' });
   private readonly footer = h('footer', { class: 'home-footer muted small' });
   private readonly statusSlot = h('div', {});
+  /** The "not protected" banner, while the library is unprotected and it was not dismissed. */
+  private readonly protectSlot = h('div', {});
   private readonly search: HTMLInputElement;
   private query = '';
   private sort: SortOrder;
@@ -115,6 +118,7 @@ export class Home {
       'main',
       { class: 'home-main' },
       banner,
+      this.protectSlot,
       this.statusSlot,
       h('section', { class: 'home-section', 'aria-labelledby': 'create-title' }, h('h2', { id: 'create-title' }, 'Create'), this.createRow),
       h('section', { class: 'home-section', 'aria-labelledby': 'docs-title' },
@@ -155,6 +159,7 @@ export class Home {
   }
 
   refresh(): void {
+    this.renderProtectBanner();
     this.renderFilters();
     this.renderDocs();
     this.renderFooter().catch((error: unknown) => console.warn('storage estimate unavailable:', error));
@@ -359,6 +364,26 @@ export class Home {
     ];
   }
 
+  /** Says, on every visit, that an unprotected library can be read from the shared origin. */
+  private renderProtectBanner(): void {
+    if (!showProtectBanner(this.vault.isProtected)) {
+      this.protectSlot.replaceChildren();
+      return;
+    }
+    this.protectSlot.replaceChildren(h(
+      'section',
+      { class: 'banner protect-banner', role: 'region', 'aria-label': 'Library not protected' },
+      h('p', {}, h('strong', {}, 'This library is not protected. '), sharedOriginRisk(location.host),
+        ' Protect it with a passphrase so that only you can open these documents.'),
+      h('div', { class: 'actions' },
+        button('Not now', () => {
+          dismissProtectBanner();
+          this.protectSlot.replaceChildren();
+        }, 'link'),
+        button('Protect this library', () => this.run(() => this.host.protect()), 'primary')),
+    ));
+  }
+
   /** Storage use and persistence, then how the library is protected. */
   private async renderFooter(): Promise<void> {
     const storage = h('span', {});
@@ -366,7 +391,7 @@ export class Home {
       ? h('span', { class: 'protection' }, h('strong', {}, 'Protected'), ' · ',
         button('Lock now', () => this.run(() => this.host.lockLibrary()), 'link'))
       : h('span', { class: 'protection' }, h('strong', {}, 'Not protected'),
-        ': anyone using this browser profile can open these documents. ',
+        `: anyone using this browser profile, or any page served from ${location.host}, can open these documents. `,
         button('Protect…', () => this.run(() => this.host.protect()), 'link'));
     this.footer.replaceChildren(protection, storage);
     if (!navigator.storage?.estimate) return;

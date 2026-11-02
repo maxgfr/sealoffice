@@ -11,7 +11,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   Check, DIST, type LocalRelay, SHOTS, WORD, dialog, hasWebGpu, launch, readClipboard, routeRelays, serve, shot, typeInEditor,
-  waitHome, wordText,
+  startUnprotected, waitHome, wordText,
 } from './lib';
 
 /** A little more than the app's pause before typing takes the pen (AUTO_PEN_IDLE_MS). */
@@ -52,6 +52,7 @@ async function main(): Promise<number> {
     const gpu = await hasWebGpu(host);
     check.ok(gpu, 'WebGPU adapter available');
     if (!gpu) return 1;
+    await startUnprotected(host);
     await waitHome(host);
 
     // A: one tile, a kind, and the session's link is in the address bar and the clipboard.
