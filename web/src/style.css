@@ -374,3 +374,6 @@ ul.doc-list .doc-more { position: static; }
   .progress.indeterminate .progress-bar { animation: none; width: 100%; }
   .tile { transition: none; }
 }
+.protect-banner { display: grid; gap: 8px; margin-bottom: 16px; }
+.protect-banner p { margin: 0; }
+.protect-banner .actions { justify-content: flex-end; }

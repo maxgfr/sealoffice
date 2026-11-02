@@ -37,7 +37,8 @@ export async function protectDialog(vault: Vault): Promise<boolean> {
 async function unprotectDialog(vault: Vault): Promise<boolean> {
   const values = await form({
     title: 'Remove protection',
-    text: 'The library key is then stored without a passphrase: anyone using this browser profile can open these documents. ' +
+    text: 'The library key is then stored without a passphrase: anyone using this browser profile, ' +
+      `or any page served from ${location.host}, can open these documents. ` +
       'The passkey and the recovery key stop working. Documents locked with their own passphrase stay locked.',
     fields: [{ name: 'passphrase', label: 'Passphrase', type: 'password', autocomplete: 'current-password' }],
     acknowledge: 'I understand that the documents will no longer be protected',
@@ -66,7 +67,8 @@ export function settingsDialog(vault: Vault, actions: DocActions, host: Settings
       if (!vault.isProtected) {
         protection.replaceChildren(
           heading,
-          h('p', {}, h('strong', {}, 'Not protected'), ': anyone using this browser profile can open these documents.'),
+          h('p', {}, h('strong', {}, 'Not protected'),
+            `: anyone using this browser profile, or any page served from ${location.host}, can open these documents.`),
           h('div', { class: 'settings-actions' }, button('Protect with a passphrase…', () => run(async () => {
             if (!(await protectDialog(vault))) return;
             host.changed();

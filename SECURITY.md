@@ -21,7 +21,8 @@ deployment pipeline.
 
 ## Threat model in brief
 
-- **Unprotected library (default).** Readable by anyone with access to the
+- **Unprotected library (explicit opt-out; new libraries are protected by
+  default).** Readable by anyone with access to the
   browser profile, and on the live site by any script on the shared
   `maxgfr.github.io` origin: the library key is stored in the clear next to
   the encrypted documents. Reading it that way is not a vulnerability.

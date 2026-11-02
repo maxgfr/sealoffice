@@ -117,7 +117,7 @@ function isManifestLock(lock: unknown): lock is { wrapped: string; size: number 
 
 /** The vault operations restoring into a new vault needs. */
 export interface NewVault extends BackupVault {
-  create(passphrase: string): Promise<void>;
+  create(passphrase: string): Promise<unknown>;
   wipe(): Promise<void>;
 }
 

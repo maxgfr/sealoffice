@@ -260,7 +260,8 @@ export class Vault {
     return { ...copyEntry(entry), blob: current.blob, sha256: current.sha256, versions };
   }
 
-  create(passphrase: string): Promise<void> {
+  /** Creates a library protected by `passphrase`, and opens it; resolves to its recovery key. */
+  create(passphrase: string): Promise<string> {
     return this.serial(async () => {
       if (await this.exists()) throw new Error('a vault already exists');
       if (passphrase.length === 0) throw new Error('empty passphrase');
@@ -271,6 +272,7 @@ export class Vault {
         this.protectedLibrary = true;
         this.entries = [];
         await this.saveIndex();
+        return secretKey(identity);
       } catch (error) {
         this.lock();
         throw error;

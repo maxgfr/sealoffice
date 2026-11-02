@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { RELAYS } from '../../src/live/transport';
 import {
   Check, DIST, type LocalRelay, SHOTS, WORD, appbar, card, cardMenu, dialog, editorShown, goHome, hasWebGpu, home, launch, openCard, readClipboard,
-  routeRelays, serve, shot, typeInEditor, waitHome, wordText,
+  routeRelays, serve, shot, startUnprotected, typeInEditor, waitHome, wordText,
 } from './lib';
 
 const PASSPHRASE = 'correct horse battery staple';
@@ -226,9 +226,26 @@ async function main(): Promise<number> {
       return 1;
     }
 
-    // 1. First launch: the home screen, no passphrase, three tiles.
+    // 1. First launch: protection is the default; leaving it unprotected takes an acknowledged warning.
+    await page.getByRole('heading', { name: 'Protect your library' }).waitFor({ timeout: 60_000 });
+    check.ok(await page.getByRole('button', { name: 'Create protected library' }).isVisible(),
+      'first launch asks for a passphrase to protect the new library');
+    await page.getByRole('button', { name: 'Continue without protection…' }).click();
+    const optOut = dialog(page).getByRole('button', { name: 'Continue without protection', exact: true });
+    const optOutBlocked = await optOut.isDisabled();
+    await dialog(page).getByRole('checkbox').check();
+    await optOut.click();
+    check.ok(optOutBlocked, 'opting out of protection stays disabled until the warning is acknowledged');
     await waitHome(page);
-    check.ok(!(await page.locator('#passphrase').isVisible()), 'first launch opens on the home screen without a passphrase');
+    check.ok(!(await page.locator('#passphrase').isVisible()), 'an opted-out library opens on the home screen without a passphrase');
+    const banner = page.getByRole('region', { name: 'Library not protected' });
+    check.ok(await banner.getByRole('button', { name: 'Protect this library' }).isVisible(),
+      'the home screen of an unprotected library shows the banner with "Protect this library"');
+    await banner.getByRole('button', { name: 'Not now' }).click();
+    check.ok((await banner.count()) === 0, '"Not now" hides the banner');
+    await page.reload();
+    await waitHome(page);
+    check.ok((await banner.count()) === 0, 'the banner stays hidden for the rest of the session');
     const tiles = ['Word document', 'Excel workbook', 'PowerPoint presentation'];
     const tilesShown = await Promise.all(tiles.map((name) => page.getByRole('button', { name, exact: true }).isEnabled()));
     check.ok(tilesShown.every(Boolean), 'home shows the three create tiles');
@@ -475,6 +492,7 @@ async function main(): Promise<number> {
     const restored = await restoredContext.newPage();
     watch(restored);
     await restored.goto(`${origin}/`);
+    await startUnprotected(restored);
     await waitHome(restored);
     const choosing = restored.waitForEvent('filechooser');
     await restored.getByRole('button', { name: 'Restore a backup…' }).click();
@@ -523,6 +541,7 @@ async function main(): Promise<number> {
     const shared = await sharedContext.newPage();
     watch(shared);
     await shared.goto(shareLink);
+    await startUnprotected(shared);
     await shared.getByRole('heading', { name: 'Shared document' }).waitFor({ timeout: 60_000 });
     await dialog(shared).getByRole('button', { name: 'Save' }).click();
     await dialog(shared).getByRole('heading', { name: 'Saved' }).waitFor({ timeout: 30_000 });
@@ -580,9 +599,10 @@ async function main(): Promise<number> {
       // The pen holder's autosave sends a snapshot every 3 s.
       await page.waitForTimeout(10_000);
       await guestBar.getByRole('button', { name: 'Save a copy in my library' }).click();
+      await startUnprotected(guest);
       await dialog(guest).getByRole('heading', { name: 'Copy saved' }).waitFor({ timeout: 60_000 });
       await dialog(guest).getByRole('button', { name: 'OK' }).click();
-      check.ok(true, 'a guest saves a copy into a new, unprotected library without a passphrase');
+      check.ok(true, 'a guest saves a copy into a new library, through the first-launch screen');
       await guestBar.getByRole('button', { name: 'Leave' }).click();
       await guest.waitForURL(`${origin}/`, { timeout: 30_000 });
       await waitHome(guest);
@@ -610,6 +630,7 @@ async function main(): Promise<number> {
     const lost = await lostContext.newPage();
     watch(lost);
     await lost.goto(`${origin}/`);
+    await startUnprotected(lost);
     await waitHome(lost);
     await lost.getByRole('button', { name: 'Word document', exact: true }).click();
     await editorShown(lost);
@@ -635,6 +656,8 @@ async function main(): Promise<number> {
     check.ok(disabledAtFirst && disabledWithBoxOnly && disabledWithWrongWord && enabledAtLast,
       'Delete everything stays disabled until the box is ticked and DELETE typed');
     await startOver.click();
+    // Starting over goes through the first-launch screen again: protected unless opted out.
+    await startUnprotected(lost);
     await waitHome(lost);
     await shot(lost, '13-started-over');
     check.ok((await lost.locator('.doc-card').count()) === 0 && !(await lost.locator('#passphrase').isVisible()),

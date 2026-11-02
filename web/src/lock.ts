@@ -3,10 +3,11 @@
 import { download } from './exporter';
 import type { FlushResult } from './autosave';
 import { prfSupported, unlockWithPasskey } from './passkey';
+import { createLibrary, MIN_PASSPHRASE, sharedOriginRisk } from './protection';
 import { button, confirm, errorMessage, form, h, modal } from './ui';
 import { recoveryKeyFile, type Vault } from './vault';
 
-export const MIN_PASSPHRASE = 10;
+export { MIN_PASSPHRASE };
 const HIDDEN_LOCK_MS = 2 * 60 * 1000;
 const IDLE_SETTING = 'sealoffice-idle-minutes';
 const DEFAULT_IDLE_MINUTES = 10;
@@ -27,7 +28,7 @@ export async function lockScreen(root: HTMLElement, vault: Vault): Promise<void>
     }, 'link');
     const lostBoth = button('Lost both? Delete everything and start over', () => {
       error.textContent = '';
-      startOverDialog(vault).then((done) => {
+      startOverDialog(vault, root).then((done) => {
         if (!done) return;
         card.remove();
         resolve();
@@ -80,6 +81,95 @@ export async function lockScreen(root: HTMLElement, vault: Vault): Promise<void>
             submit.disabled = false;
             submit.textContent = 'Unlock';
             passphrase.select();
+          });
+      }, 0));
+    });
+    root.replaceChildren(card);
+    passphrase.focus();
+  });
+}
+
+/**
+ * First launch: a new library is protected by a passphrase unless the user
+ * explicitly opts out, after a warning they must acknowledge. Resolves once
+ * the library exists and is open.
+ */
+export function createScreen(root: HTMLElement, vault: Vault): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const error = h('p', { class: 'form-error', role: 'alert' });
+    const passphrase = h('input', { id: 'new-passphrase', type: 'password', autocomplete: 'new-password', required: true });
+    const repeat = h('input', { id: 'repeat-passphrase', type: 'password', autocomplete: 'new-password', required: true });
+    const submit = h('button', { type: 'submit', class: 'primary' }, 'Create protected library');
+    const done = (): void => {
+      card.remove();
+      resolve();
+    };
+    const unprotected = button('Continue without protection…', () => {
+      error.textContent = '';
+      void form({
+        title: 'Continue without protection?',
+        text: `${sharedOriginRisk(location.host)} Anything you put in the library can be read that way. ` +
+          'You can protect it later from Settings.',
+        fields: [],
+        acknowledge: `I understand that any page served from ${location.host} can open these documents`,
+        submit: 'Continue without protection',
+        danger: true,
+        validate: async () => {
+          await createLibrary(vault, { protect: false, acknowledged: true });
+          return null;
+        },
+      }).then((values) => {
+        if (values) done();
+      }, (e: unknown) => {
+        error.textContent = errorMessage(e);
+      });
+    }, 'link');
+    const createForm = h(
+      'form',
+      { class: 'form', novalidate: true },
+      h('label', { class: 'field', for: 'new-passphrase' }, h('span', {}, 'Passphrase'), passphrase),
+      h('label', { class: 'field', for: 'repeat-passphrase' }, h('span', {}, 'Repeat passphrase'), repeat),
+      error,
+      h('div', { class: 'actions' }, submit),
+      h('div', { class: 'lock-links' }, unprotected),
+    );
+    const card = h(
+      'main',
+      { class: 'card lock' },
+      h('p', { class: 'brand' }, 'sealoffice'),
+      h('h1', {}, 'Protect your library'),
+      h('p', { class: 'muted' },
+        'Your documents are encrypted on this device with a key that this passphrase protects. ' +
+        'sealoffice asks for it when it starts, and locks after a while without activity. ' +
+        'You get a recovery key next; a passkey can be added in Settings.'),
+      createForm,
+    );
+    createForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      error.textContent = '';
+      if (passphrase.value.length < MIN_PASSPHRASE) {
+        error.textContent = `Use at least ${MIN_PASSPHRASE} characters.`;
+        return;
+      }
+      if (passphrase.value !== repeat.value) {
+        error.textContent = 'The passphrases do not match.';
+        return;
+      }
+      submit.disabled = true;
+      submit.textContent = 'Creating…';
+      // Let the button repaint before scrypt keeps the page busy.
+      requestAnimationFrame(() => setTimeout(() => {
+        createLibrary(vault, { protect: true, passphrase: passphrase.value })
+          .then(async (key) => {
+            passphrase.value = '';
+            repeat.value = '';
+            if (key) await recoveryKeyDialog(key);
+            done();
+          })
+          .catch((e: unknown) => {
+            error.textContent = errorMessage(e);
+            submit.disabled = false;
+            submit.textContent = 'Create protected library';
           });
       }, 0));
     });
@@ -288,10 +378,10 @@ export async function changePassphraseDialog(vault: Vault): Promise<boolean> {
 
 /**
  * "Lost both?": without the passphrase or the recovery key nothing can be
- * decrypted, so the only way out is to erase the library and start an empty,
- * unprotected one. True once that is done.
+ * decrypted, so the only way out is to erase the library and start an empty
+ * one, through the same first-launch screen. True once that is done.
  */
-async function startOverDialog(vault: Vault): Promise<boolean> {
+async function startOverDialog(vault: Vault, root: HTMLElement): Promise<boolean> {
   const values = await form({
     title: 'Delete everything and start over',
     text: 'Without the passphrase or the recovery key, nothing in this library can be recovered. ' +
@@ -305,7 +395,7 @@ async function startOverDialog(vault: Vault): Promise<boolean> {
   });
   if (!values) return false;
   await vault.wipe();
-  await vault.createUnprotected();
+  await createScreen(root, vault);
   return true;
 }
 

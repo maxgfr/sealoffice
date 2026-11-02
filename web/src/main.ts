@@ -10,7 +10,7 @@ import { assetBase, type BlankKind, loadEditor, type EditorModule } from './edit
 import { Autosaver } from './autosave';
 import { Home, NEW_KINDS } from './home';
 import { extension } from './importer';
-import { lockNow, lockScreen, persistStorage, setSaveBeforeLock, startAutoLock, unloading } from './lock';
+import { createScreen, lockNow, lockScreen, persistStorage, setSaveBeforeLock, startAutoLock, unloading } from './lock';
 import { protectDialog, settingsDialog } from './settings';
 import { OpfsStore } from './store';
 import { DiskLinks, diskLinksSupported, IdbHandleStore } from './diskfile';
@@ -172,7 +172,7 @@ async function receiveShare(actions: DocActions, shared: { link: SharedLink | nu
 }
 
 /**
- * One active tab, then the library: created unprotected on first launch,
+ * One active tab, then the library: created on first launch (protected unless the user opts out),
  * opened at once when unprotected, through the lock screen in `root` when protected.
  */
 async function openVault(root: HTMLElement): Promise<{ vault: Vault; seal: SealCrypto; release: () => Promise<void> }> {
@@ -187,7 +187,7 @@ async function openVault(root: HTMLElement): Promise<{ vault: Vault; seal: SealC
   });
   const state = await vault.state();
   if (state === 'none') {
-    await vault.createUnprotected();
+    await createScreen(root, vault);
     await persistStorage().catch((error: unknown) => console.warn('persistent storage unavailable:', error));
   } else if (state === 'open') {
     await vault.openUnprotected();
