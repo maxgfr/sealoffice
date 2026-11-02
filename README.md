@@ -116,8 +116,16 @@ Nothing asks for a passphrase by default. Encryption is there when you want it:
 - While a document is open, its key and its contents are in the browser's
   memory in plaintext. Malware on your machine or a malicious browser
   extension can read them.
+- The live site shares its origin, `maxgfr.github.io`, with the account's
+  other GitHub Pages projects, and OPFS belongs to the origin, not the path.
+  A script running on any page of that origin (a bug or a compromised
+  dependency in another project) can read the library's files: for an
+  unprotected library that includes `identity.key`, so it can open your
+  documents. Protect the library, or self-host it on its own origin, if that
+  matters to you.
 - Clearing site data deletes the library. Make backups, and keep the recovery
-  key.
+  key. On the live site, clearing data for `maxgfr.github.io` clears every
+  project's data at once.
 - A weak passphrase can be brute-forced from a copy of the library or of a
   locked document. scrypt slows this down; it does not prevent it.
 

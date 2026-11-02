@@ -22,8 +22,9 @@ deployment pipeline.
 ## Threat model in brief
 
 - **Unprotected library (default).** Readable by anyone with access to the
-  browser profile: the library key is stored in the clear next to the
-  encrypted documents. Reading it that way is not a vulnerability.
+  browser profile, and on the live site by any script on the shared
+  `maxgfr.github.io` origin: the library key is stored in the clear next to
+  the encrypted documents. Reading it that way is not a vulnerability.
 - **Protected library.** Documents, versions and the index must not be
   readable from a copy of the storage without the passphrase, the recovery
   key or the passkey.
