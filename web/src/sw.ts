@@ -40,6 +40,22 @@ const resolve = (path: string): string => new URL(path, scope.registration.scope
 
 const fresh = (path: string): Promise<Response> => fetch(new Request(resolve(path), { cache: 'no-cache' }));
 
+/**
+ * A copy from this app's own caches only: this deploy's first, then the others it kept (a page
+ * still running the previous deploy). Never `caches.match()`, which searches every cache of the
+ * origin, and the origin (maxgfr.github.io) is shared by other sites, which could plant a
+ * response for our URLs in a cache of theirs.
+ */
+async function ownMatch(request: Request, options?: CacheQueryOptions): Promise<Response | undefined> {
+  const names = (await caches.keys()).filter((name) => name.startsWith(PREFIX) && name !== META && name !== CACHE);
+  for (const name of [CACHE, ...names]) {
+    if (!(await caches.has(name))) continue;
+    const hit = await (await caches.open(name)).match(request, options);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
 async function sha256(response: Response): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', await response.arrayBuffer()));
   return Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('');
@@ -97,14 +113,14 @@ scope.addEventListener('fetch', (event) => {
   if (request.method !== 'GET' || url.origin !== scope.location.origin) return;
   if (url.pathname.endsWith(`/${BUILD_INFO}`)) {
     // Always ask the network first, so a new release is noticed.
-    event.respondWith(fetch(request).catch(async () => (await caches.match(request)) ?? Response.error()));
+    event.respondWith(fetch(request).catch(async () => (await ownMatch(request)) ?? Response.error()));
     return;
   }
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
     const options = { ignoreSearch: request.mode === 'navigate' };
     // This deploy's copy first, then the previous deploy's (a page still running it).
-    const cached = (await cache.match(request, options)) ?? (await caches.match(request, options));
+    const cached = await ownMatch(request, options);
     if (cached) return cached;
     const response = await fetch(request);
     if (response.ok && response.type === 'basic' && url.pathname.startsWith(new URL(resolve(ASSETS)).pathname)) {
