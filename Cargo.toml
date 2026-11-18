@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/seal-crypto"]
+members = ["crates/seal-crypto", "crates/seal-pdf"]
 exclude = ["vendor"]
 
 [workspace.package]

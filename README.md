@@ -22,7 +22,8 @@ Powered by [ibisOffice](https://github.com/ibisjp/ibis-office).
 - Imports plain Office files, password-protected Office files (Agile
   encryption) and age files; downloads as plain Office files, encrypted age
   files or password-protected Office files.
-- Works offline after the first load (service worker).
+- Works offline after the first load (service worker), except the first PDF
+  export, which downloads the converter.
 - Saves automatically and keeps the last 10 versions of each document.
 - Backs up the whole library as one file, `sealoffice-backup-YYYY-MM-DD.tar.age`,
   and restores it.
@@ -37,7 +38,15 @@ Powered by [ibisOffice](https://github.com/ibisjp/ibis-office).
   has paused for 5 seconds.
 - Without WebGPU or WebGL2 the editor cannot run; the page then opens without
   editing (import, export, backup).
-- PDF export and printing are not available.
+- Exports Word, Excel and PowerPoint documents as PDF, from the Download
+  menu or the editor's File > Export > PDF (which includes unsaved edits).
+  The conversion runs in the page with [office2pdf](https://github.com/developer0hye/office2pdf)
+  (Typst); nothing is uploaded. Its layout is Typst's, so the PDF can differ
+  slightly from what the editor shows. CSV files cannot be exported as PDF.
+  The converter (about 40 MB, 18 MB compressed) is not downloaded with the
+  app: the first PDF export needs a connection to fetch it, checked against
+  the deploy's SHA-256 before use; later exports work offline.
+- Printing is not available: export a PDF and print it.
 
 ## Encryption, three levels
 
@@ -92,13 +101,17 @@ Powered by [ibisOffice](https://github.com/ibisjp/ibis-office).
 - **Encrypted exports.** An age export is encrypted with a passphrase you
   choose for that file; a protected Office export uses Office Agile
   encryption. Both are independent of the library.
+- **PDF exports** are not encrypted, like an original-file download. They are
+  made in the page by the seal-pdf wasm; the document is not sent anywhere
+  to be converted.
 - **Share links.** The decryption key travels in the link's `#fragment`,
   which browsers never send to the server. Anyone with the full link can open
   the document. With "separate key", the link carries no key and you send the
   key another way.
 - **No network after load.** `index.html` fetches its own code and assets from
-  its origin and nothing else. A Content Security Policy restricts scripts,
-  connections and frames to the same origin.
+  its origin and nothing else (the PDF converter too, on the first PDF
+  export). A Content Security Policy restricts scripts, connections and
+  frames to the same origin.
 - **Live sessions are the exception.** Only `live.html` opens network
   connections, and only while you are in a session. Peers find each other
   through [Trystero](https://github.com/dmotz/trystero) over third-party
@@ -198,14 +211,14 @@ python3 -m http.server -d dist 8080
 ```
 
 `scripts/build.sh` applies `patches/*.patch` to `vendor/ibis-office` (once),
-builds the editor and seal-crypto wasm modules, bundles the page and writes
-`dist/build-info.json` and `dist/SHA256SUMS`. `--crypto-only` builds only the
+builds the editor, seal-crypto and seal-pdf wasm modules, bundles the page and
+writes `dist/build-info.json` and `dist/SHA256SUMS`. `--crypto-only` builds only the
 seal-crypto module into `web/src/pkg/seal/` for the unit tests.
 
 Tests:
 
 ```sh
-cargo test -p seal-crypto
+cargo test -p seal-crypto -p seal-pdf
 scripts/build.sh --crypto-only && (cd web && bun test)
 ```
 
@@ -221,4 +234,4 @@ sealoffice is licensed under the GNU Affero General Public License v3.0 only
 in ibisOffice's `NOTICE`, the user interface displays "Powered by ibisOffice"
 with a link to the upstream repository; derivatives of sealoffice must keep
 it. See `NOTICE` and `vendor/ibis-office/www/license.md` for third-party
-licenses.
+licenses; PDF export uses office2pdf and Typst (Apache-2.0).

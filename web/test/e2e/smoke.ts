@@ -292,6 +292,31 @@ async function main(): Promise<number> {
     check.ok(await powered.isVisible(), 'About shows the "Powered by ibisOffice" link');
     await page.locator('dialog').getByRole('button', { name: 'Close' }).click();
 
+    // Download ▸ PDF, cancelled while the converter loads: the dialog closes, no alert, no download.
+    let cancelledPdf = false;
+    const onCancelledPdf = (): void => {
+      cancelledPdf = true;
+    };
+    page.on('download', onCancelledPdf);
+    await appbar(page).getByRole('button', { name: 'Download', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'PDF', exact: true }).click();
+    await dialog(page).getByRole('button', { name: 'Cancel', exact: true }).click();
+    await page.locator('dialog').waitFor({ state: 'detached', timeout: 10_000 }).catch(() => undefined);
+    await page.waitForTimeout(1000);
+    page.off('download', onCancelledPdf);
+    check.ok(!cancelledPdf && (await page.locator('dialog').count()) === 0, 'Cancel in "Making the PDF…" stops the export quietly');
+
+    // Download ▸ PDF: converted in the page (the converter loads now, from this origin), no passphrase asked.
+    const pdfDownload = page.waitForEvent('download', { timeout: 120_000 });
+    await appbar(page).getByRole('button', { name: 'Download', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'PDF', exact: true }).click();
+    const pdfFile = await pdfDownload;
+    const pdfBytes = readFileSync(await pdfFile.path());
+    check.ok(pdfFile.suggestedFilename() === 'Document.pdf' && pdfBytes.subarray(0, 5).toString() === '%PDF-',
+      `Download ▸ PDF gives a PDF named after the document (${pdfFile.suggestedFilename()}, ${pdfBytes.length} bytes)`);
+    await page.locator('dialog').waitFor({ state: 'detached', timeout: 10_000 }).catch(() => undefined);
+    check.ok(pageErrors.length === 0, `no uncaught errors after the PDF export (${pageErrors.join('; ')})`);
+
     // 2. Excel and PowerPoint open in the same editor.
     for (const [tile, name] of [['Excel workbook', EXCEL], ['PowerPoint presentation', POWERPOINT]] as const) {
       await goHome(page);

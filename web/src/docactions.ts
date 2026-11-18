@@ -7,9 +7,10 @@ import type { Autosaver } from './autosave';
 import { createBackup, openBackup, restoreBackup } from './backup';
 import { type DiskLinks, pickAgeFile, pickSaveTarget } from './diskfile';
 import type { SealCrypto } from './crypto';
-import { canOfficeProtect, download, exportDocument, type ExportFormat } from './exporter';
+import { canOfficeProtect, download, downloadPdf, exportDocument, type ExportFormat } from './exporter';
 import { extension, importFile, isDocumentName, type AskSecret } from './importer';
 import { newSessionSecrets } from './live/protocol';
+import { canPdf, isAbort } from './pdf';
 import { MAX_LINK_LENGTH, openShare, randomKey, shareFile, shareFragment, type SharedLink } from './share';
 import {
   alert, button, confirm, errorMessage, form, formatDate, formatSize, h, modal, pickLocalFile,
@@ -156,6 +157,7 @@ export class DocActions {
           button('Encrypted .age file (passphrase)', () => close('age'), 'primary'),
           canOfficeProtect(entry.name) ? button('Password-protected Office file', () => close('office')) : null,
           button('Original file, not encrypted', () => close('plain')),
+          canPdf(entry.name) ? button('PDF, not encrypted', () => close('pdf')) : null,
         ),
         h('div', { class: 'actions' }, button('Cancel', () => close(null))),
       );
@@ -166,6 +168,15 @@ export class DocActions {
 
   private async exportChosen(entry: DocEntry, chosen: ExportFormat, version: string | undefined): Promise<void> {
     const id = entry.id;
+    const read = (): Promise<Uint8Array> => (version === undefined ? this.vault.read(id) : this.vault.readVersion(id, version));
+    if (chosen === 'pdf') {
+      const doc = { name: entry.name, bytes: await read() };
+      await downloadPdf(doc).catch((error: unknown) => {
+        if (isAbort(error)) return;
+        throw new Error(`"${entry.name}" was not exported to PDF: ${errorMessage(error)}`);
+      });
+      return;
+    }
     let secret = '';
     if (chosen !== 'plain') {
       const word = chosen === 'age' ? 'passphrase' : 'password';
@@ -188,8 +199,7 @@ export class DocActions {
       if (!values) return;
       secret = values.secret ?? '';
     }
-    const bytes = version === undefined ? await this.vault.read(id) : await this.vault.readVersion(id, version);
-    download(exportDocument({ name: entry.name, bytes }, chosen, secret, this.seal));
+    download(exportDocument({ name: entry.name, bytes: await read() }, chosen, secret, this.seal));
   }
 
   /** Links `entry` to a new .age file on disk, or removes its link. True when changed. */

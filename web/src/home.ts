@@ -4,8 +4,7 @@
 // how the library is stored and protected.
 import type { BlankKind } from './editor';
 import { type DocActions, LIVE_PRIVACY } from './docactions';
-import type { ExportFormat } from './exporter';
-import { canOfficeProtect } from './exporter';
+import { canExport, DOWNLOAD_FORMATS } from './exporter';
 import { fileIcon, icon } from './icons';
 import { ACCEPT } from './importer';
 import {
@@ -334,7 +333,6 @@ export class Home {
     const refreshAfter = (action: () => Promise<unknown>) => (): void => this.run(async () => {
       if (await action()) this.refresh();
     });
-    const formats: [ExportFormat, string][] = [['plain', 'Original'], ['age', 'Encrypted .age'], ['office', 'Password-protected Office']];
     return [
       this.host.graphics ? { label: 'Open', action: () => this.run(() => this.host.open(entry)) } : null,
       { label: 'Rename…', action: refreshAfter(() => a.renameDoc(entry)) },
@@ -348,9 +346,9 @@ export class Home {
       { label: 'Version history', action: refreshAfter(() => a.history(entry)) },
       {
         label: 'Download',
-        items: formats.map(([format, label]) => ({
+        items: DOWNLOAD_FORMATS.map(([format, label]) => ({
           label,
-          disabled: format === 'office' && !canOfficeProtect(entry.name),
+          disabled: !canExport(format, entry.name),
           action: () => this.run(() => a.exportDoc(entry.id, format)),
         })),
       },

@@ -3,8 +3,7 @@
 // name (renamed in place), its save state, Share, Download ▸, ⋯ and, in a
 // protected library, Lock library. The editor's canvas starts below it.
 import type { DocActions } from './docactions';
-import type { ExportFormat } from './exporter';
-import { canOfficeProtect } from './exporter';
+import { canExport, DOWNLOAD_FORMATS } from './exporter';
 import { fileIcon, icon } from './icons';
 import { button, h, type MenuItem, menuButton } from './ui';
 import type { DocEntry, Vault } from './vault';
@@ -47,10 +46,9 @@ export class AppBar {
       const entry = await this.savedEntry('Share');
       if (entry) await actions.shareDoc(entry.id);
     }));
-    const formats: [ExportFormat, string][] = [['plain', 'Original'], ['age', 'Encrypted .age'], ['office', 'Password-protected Office']];
-    const downloadMenu = menuButton([icon('download', 16), h('span', {}, 'Download')], 'Download', () => formats.map(([format, label]) => ({
+    const downloadMenu = menuButton([icon('download', 16), h('span', {}, 'Download')], 'Download', () => DOWNLOAD_FORMATS.map(([format, label]) => ({
       label,
-      disabled: format === 'office' && !canOfficeProtect(host.currentName()),
+      disabled: !canExport(format, host.currentName()),
       action: run(async () => {
         const entry = await this.savedEntry('Download');
         if (entry) await actions.exportDoc(entry.id, format);

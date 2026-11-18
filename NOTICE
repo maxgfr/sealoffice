@@ -20,3 +20,11 @@ embeds them in the editor next to the Regular face ibisOffice ships.
 
 Third-party licenses of the editor's dependencies are listed in
 vendor/ibis-office/www/license.md (shipped as third-party-licenses.md).
+
+PDF export (crates/seal-pdf) uses office2pdf
+(https://github.com/developer0hye/office2pdf) and Typst
+(https://github.com/typst/typst), both licensed under Apache-2.0, and embeds
+the fonts they ship: Typst's (typst-assets: Libertinus Serif, New Computer
+Modern, DejaVu Sans Mono, Foxit) and office2pdf's (Noto Serif, Noto Sans,
+Selawik). The build appends the list of its crates and those fonts' notices
+to third-party-licenses.md.

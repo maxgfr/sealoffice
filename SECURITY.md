@@ -13,10 +13,10 @@ reproduce, and the impact you expect. You should get a first answer within
 ## Scope
 
 In scope: the library format and key handling (protected library, per-document
-locks, the crash-safe switch to a protected library), the seal-crypto wasm
-module, the page and service worker code (including `live.html` and live
-sessions), the recovery key, passkey and share-link key handling, encrypted
-exports and backups, the Content Security Policy, and the build and
+locks, the crash-safe switch to a protected library), the seal-crypto and
+seal-pdf wasm modules, the page and service worker code (including `live.html`
+and live sessions), the recovery key, passkey and share-link key handling,
+encrypted exports and backups, the Content Security Policy, and the build and
 deployment pipeline.
 
 ## Threat model in brief

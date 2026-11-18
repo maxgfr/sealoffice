@@ -1,0 +1,19 @@
+[package]
+name = "seal-pdf"
+description = "Local PDF export of Word, Excel and PowerPoint files (office2pdf) for sealoffice, compiled to WebAssembly."
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "=0.2.128"
+
+# The crate only ships as wasm. A native build would compile Typst for nothing
+# (and, without default features, with no fonts), so `cargo test` there checks
+# the extension mapping alone. On wasm32 office2pdf embeds Typst's fonts itself.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+office2pdf = { version = "=0.11.0", default-features = false }

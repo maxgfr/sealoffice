@@ -168,6 +168,31 @@ export function confirm(title: string, text: string, ok: string, danger = false)
   }, false);
 }
 
+/**
+ * Runs `task` behind a dialog titled `title` that cannot be dismissed, unless
+ * `cancellable`: a Cancel button (and Escape) then aborts the signal `task`
+ * gets, with an AbortError it rejects with. The dialog paints first: a long
+ * synchronous step in `task` would otherwise freeze the page before it shows.
+ */
+export async function busy<T>(title: string, text: string, task: (signal: AbortSignal) => Promise<T>, cancellable = false): Promise<T> {
+  const controller = new AbortController();
+  let close: (cancelled: boolean) => void = () => {};
+  void modal<boolean>(title, (done, body) => {
+    close = done;
+    body.append(h('p', { class: 'muted small', 'aria-live': 'polite' }, text));
+    if (cancellable) body.append(h('div', { class: 'actions' }, button('Cancel', () => done(true))));
+  }, true, cancellable).then((cancelled) => {
+    if (cancelled) controller.abort(new DOMException('cancelled', 'AbortError'));
+  });
+  try {
+    await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+    controller.signal.throwIfAborted();
+    return await task(controller.signal);
+  } finally {
+    close(false);
+  }
+}
+
 export function alert(title: string, text: string): Promise<void> {
   return modal<void>(title, (close, body) => {
     const ok = button('OK', () => close(), 'primary');

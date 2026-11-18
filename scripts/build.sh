@@ -97,9 +97,20 @@ mkdir -p dist/pkg dist/assets
 wasm-bindgen "$EDITOR_WASM" --out-dir dist/pkg/editor --target web
 cp -R web/src/pkg/seal dist/pkg/seal
 
+# --- seal-pdf wasm ----------------------------------------------------------
+# PDF export (office2pdf and Typst, fonts embedded). Not precached: the page
+# downloads and compiles it on the first PDF export, and both the page and the
+# service worker check it against build-info.json's sha256 and SHA256SUMS.
+echo "==> seal-pdf ($PROFILE)"
+RUSTFLAGS="$REMAP --remap-path-prefix=$ROOT=." \
+  cargo build -p seal-pdf --target wasm32-unknown-unknown ${FLAGS[@]+"${FLAGS[@]}"}
+PDF_WASM="target/wasm32-unknown-unknown/$PROFILE/seal_pdf.wasm"
+[[ -f "$PDF_WASM" ]] || die "missing $PDF_WASM"
+wasm-bindgen "$PDF_WASM" --out-dir dist/pkg/pdf --target web
+
 if [[ "$PROFILE" == release ]]; then
   if command -v wasm-opt >/dev/null; then
-    for w in dist/pkg/editor/ibis_office_app_bg.wasm dist/pkg/seal/seal_crypto_bg.wasm; do
+    for w in dist/pkg/editor/ibis_office_app_bg.wasm dist/pkg/seal/seal_crypto_bg.wasm dist/pkg/pdf/seal_pdf_bg.wasm; do
       echo "==> wasm-opt $w"
       wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int "$w" -o "$w"
     done
@@ -132,6 +143,8 @@ fi
 # --splitting: the live session code (and Trystero) is a chunk only live.html loads.
 bun build web/src/main.ts --outdir dist --minify --target browser --splitting
 bun build web/src/sw.ts --outfile dist/sw.js --minify --target browser
+# The worker each PDF conversion runs in.
+bun build web/src/pdfworker.ts --outfile dist/pdf-worker.js --minify --target browser
 cp web/index.html dist/
 [[ -f web/live.html ]] || die "missing web/live.html"
 cp web/live.html dist/
@@ -141,8 +154,36 @@ done
 if [[ -d web/public ]]; then cp -R web/public/. dist/; fi
 cp LICENSE NOTICE dist/
 cp "$VENDOR/www/license.md" dist/third-party-licenses.md
+# The PDF converter is ours, not the editor's: list its crates and the notices
+# of the fonts it embeds after upstream's list.
+cargo metadata --format-version 1 --filter-platform wasm32-unknown-unknown | python3 -c '
+import json, os, sys
+meta = json.load(sys.stdin)
+pkgs = {p["id"]: p for p in meta["packages"]}
+nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+root = next(i for i, p in pkgs.items() if p["name"] == "seal-pdf")
+seen, todo = set(), [root]
+while todo:
+    for dep in nodes[todo.pop()]["deps"]:
+        # Normal dependencies only: build scripts and proc macros are not in the wasm.
+        macro = any("proc-macro" in t["kind"] for t in pkgs[dep["pkg"]]["targets"])
+        if any(k["kind"] is None for k in dep["dep_kinds"]) and not macro and dep["pkg"] not in seen:
+            seen.add(dep["pkg"])
+            todo.append(dep["pkg"])
+crates = sorted((pkgs[i] for i in seen), key=lambda p: (p["name"], p["version"]))
+out = ["", "## sealoffice PDF export (`pkg/pdf/`, crates/seal-pdf)", "",
+       "Word, Excel and PowerPoint files are converted to PDF in the page by office2pdf and Typst.", "",
+       f"### Rust crates ({len(crates)})", "", "| Name | Version | License | Source |", "|---|---|---|---|"]
+out += ["| {} | {} | {} | {} |".format(p["name"], p["version"], p.get("license") or "see source", p.get("repository") or "") for p in crates]
+by_name = {p["name"]: os.path.dirname(p["manifest_path"]) for p in crates}
+for crate, files in [("typst-assets", ["NOTICE"]), ("office2pdf", ["fonts/OFL-1.1.txt", "fonts/Selawik-LICENSE.txt"])]:
+    for f in files:
+        with open(os.path.join(by_name[crate], f), encoding="utf-8") as fh:
+            out += ["", f"### {crate}: {f}", "", "```", fh.read().rstrip(), "```"]
+print("\n".join(out))
+' >> dist/third-party-licenses.md
 
-for f in dist/index.html dist/live.html dist/main.js dist/sw.js dist/pkg/editor/ibis_office_app_bg.wasm dist/pkg/seal/seal_crypto_bg.wasm; do
+for f in dist/index.html dist/live.html dist/main.js dist/sw.js dist/pdf-worker.js dist/pkg/editor/ibis_office_app_bg.wasm dist/pkg/seal/seal_crypto_bg.wasm dist/pkg/pdf/seal_pdf_bg.wasm; do
   [[ -f "$f" ]] || die "missing $f"
 done
 
@@ -154,11 +195,12 @@ COMMIT=$(git rev-parse --verify -q HEAD 2>/dev/null || echo unknown)
 UPSTREAM_COMMIT=$(git -C "$VENDOR" rev-parse --verify -q HEAD 2>/dev/null || echo unknown)
 EDITOR_SHA=$(sha256 dist/pkg/editor/ibis_office_app_bg.wasm | awk '{print $1}')
 SEAL_SHA=$(sha256 dist/pkg/seal/seal_crypto_bg.wasm | awk '{print $1}')
+PDF_SHA=$(sha256 dist/pkg/pdf/seal_pdf_bg.wasm | awk '{print $1}')
 
 (cd dist && find . -type f ! -name SHA256SUMS ! -name build-info.json | sed 's|^\./||' | LC_ALL=C sort) > "$LISTING"
-python3 - "$VERSION" "$COMMIT" "$UPSTREAM_COMMIT" "$EDITOR_SHA" "$SEAL_SHA" "$LISTING" > dist/build-info.json <<'PY'
+python3 - "$VERSION" "$COMMIT" "$UPSTREAM_COMMIT" "$EDITOR_SHA" "$SEAL_SHA" "$PDF_SHA" "$LISTING" > dist/build-info.json <<'PY'
 import json, sys
-version, commit, upstream, editor, seal, listing = sys.argv[1:]
+version, commit, upstream, editor, seal, pdf, listing = sys.argv[1:]
 with open(listing) as f:
     files = [line.strip() for line in f if line.strip()]
 json.dump({
@@ -169,6 +211,7 @@ json.dump({
     "sha256": {
         "pkg/editor/ibis_office_app_bg.wasm": editor,
         "pkg/seal/seal_crypto_bg.wasm": seal,
+        "pkg/pdf/seal_pdf_bg.wasm": pdf,
     },
 }, sys.stdout, indent=2)
 print()
@@ -180,4 +223,5 @@ echo
 echo "Built dist/ ($PROFILE)"
 echo "  editor wasm sha256: $EDITOR_SHA"
 echo "  seal wasm sha256:   $SEAL_SHA"
+echo "  pdf wasm sha256:    $PDF_SHA"
 echo "Serve it, e.g.: python3 -m http.server -d dist 8080"

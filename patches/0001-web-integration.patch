@@ -621,6 +621,35 @@ index 42d5301..81406cf 100644
      /// Open the .pptx, .xlsx or .docx at `path` and put it first in the
      /// recent files, then show slide `slide` (1-based) if given. A window
      /// with no document shows an empty one of the file's kind while it
+diff --git a/crates/ibis-office-shell/src/file_actions.rs b/crates/ibis-office-shell/src/file_actions.rs
+index b01e143..2ce5b90 100644
+--- a/crates/ibis-office-shell/src/file_actions.rs
++++ b/crates/ibis-office-shell/src/file_actions.rs
+@@ -449,8 +449,23 @@ impl SlideEditor {
+                 .detach();
+             });
+         }
++        // In the browser the page makes the PDF (`ibisOfficeExportPdf`) from the bytes a save would write, unsaved
++        // edits included, and downloads it.
+         #[cfg(target_family = "wasm")]
+-        self.report(Err(crate::i18n::text("_shell.exporting-is-not-yet-available-in-the-browser-ve").into()), cx);
++        {
++            let (name, bytes) = match self.web_bytes(window, cx) {
++                Ok(file) => file,
++                Err(err) => return self.report(Err(crate::i18n::format("file.pdf-failed", &[("error", &err)])), cx),
++            };
++            let (stem, _) = self.name_parts();
++            self.report(Ok(crate::i18n::text("_shell.exporting-to-pdf").into()), cx);
++            cx.spawn_in(window, async move |this, cx| {
++                let result = crate::web::export_pdf(name, bytes).await;
++                let pdf = format!("{stem}.pdf");
++                this.update(cx, |this, cx| this.report(result.map(|()| crate::i18n::format("file.pdf-done", &[("path", &pdf)])).map_err(|e| crate::i18n::format("file.pdf-failed", &[("error", &e)])), cx)).ok();
++            })
++            .detach();
++        }
+     }
+ 
+     /// ファイル > 書き出し > PNG 画像（.png）: the file as PNG pictures where
 diff --git a/crates/ibis-office-shell/src/format.rs b/crates/ibis-office-shell/src/format.rs
 index 5f1d706..a9e4465 100644
 --- a/crates/ibis-office-shell/src/format.rs
@@ -770,10 +799,10 @@ index e135742..b07035e 100644
          self.status = Some(match result {
              Ok(()) => self.save_note.take().unwrap_or_else(|| crate::i18n::text("_shell.saved").into()),
 diff --git a/crates/ibis-office-shell/src/web.rs b/crates/ibis-office-shell/src/web.rs
-index 7e2fb6d..6131cc7 100644
+index 7e2fb6d..9f124a1 100644
 --- a/crates/ibis-office-shell/src/web.rs
 +++ b/crates/ibis-office-shell/src/web.rs
-@@ -26,6 +26,19 @@ extern "C" {
+@@ -26,6 +26,31 @@ extern "C" {
      /// resolves to `{ name, bytes }`, or to `null` when cancelled.
      #[wasm_bindgen(catch, js_name = ibisOfficePickFile)]
      fn pick_file_js() -> Result<js_sys::Promise, JsValue>;
@@ -783,6 +812,11 @@ index 7e2fb6d..6131cc7 100644
 +    /// under, or to `null` when cancelled.
 +    #[wasm_bindgen(catch, js_name = ibisOfficeSaveFile)]
 +    fn save_file_js(name: &str, bytes: &[u8], save_as: bool) -> Result<js_sys::Promise, JsValue>;
++
++    /// Defined by the page: makes a PDF of the file `name` holding `bytes` and
++    /// downloads it; resolves once done, rejects with what went wrong.
++    #[wasm_bindgen(catch, js_name = ibisOfficeExportPdf)]
++    fn export_pdf_js(name: &str, bytes: &[u8]) -> Result<js_sys::Promise, JsValue>;
 +}
 +
 +/// Hand the page a saved file; the name it was stored under, or `None` if cancelled.
@@ -790,10 +824,17 @@ index 7e2fb6d..6131cc7 100644
 +    let promise = save_file_js(&name, &bytes, save_as).map_err(describe)?;
 +    let value = wasm_bindgen_futures::JsFuture::from(promise).await.map_err(describe)?;
 +    Ok(value.as_string())
++}
++
++/// Hand the page a file to export as PDF (File > Export > PDF).
++pub(crate) async fn export_pdf(name: String, bytes: Vec<u8>) -> Result<(), String> {
++    let promise = export_pdf_js(&name, &bytes).map_err(describe)?;
++    wasm_bindgen_futures::JsFuture::from(promise).await.map_err(describe)?;
++    Ok(())
  }
  
  #[wasm_bindgen]
-@@ -141,18 +154,35 @@ pub async fn load_downloaded_fonts() -> Vec<Vec<u8>> {
+@@ -141,18 +166,35 @@ pub async fn load_downloaded_fonts() -> Vec<Vec<u8>> {
  /// Opens this page in a new browser tab with `query` (`""` or `"?new=docx"`): the Web version has one editor in a page, so what the desktop
  /// opens in another window (ファイル > 新規作成 of an open document, the logo) is another tab. Called inside the click that asks for it, so
  /// the browser does not take it for a pop-up.

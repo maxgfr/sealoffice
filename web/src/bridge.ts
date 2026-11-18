@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-// The window functions the editor calls for File > Open and File > Save.
+// The window functions the editor calls for File > Open, File > Save and
+// File > Export > PDF.
 import { SaveSignal } from './autosave';
 import { editorSaveHandler } from './editor';
+import { downloadPdf } from './exporter';
 import { extension } from './importer';
 import { alert, confirm, errorMessage, form, pickLocalFile } from './ui';
 import type { Vault } from './vault';
@@ -30,6 +32,8 @@ declare global {
     ibisOfficeFontDownload?: (file: string, url: string, size: number) => Promise<number>;
     ibisOfficeFontsLoad?: () => Promise<Uint8Array[]>;
     ibisOfficeEmbedAction?: (kind: string, name: string, bytes?: Uint8Array) => void;
+    /** File > Export > PDF: the editor's document, unsaved edits included. Rejects with what went wrong, or "cancelled". */
+    ibisOfficeExportPdf?: (name: string, bytes: Uint8Array) => Promise<void>;
   }
 }
 
@@ -60,6 +64,26 @@ export function installEditorHooks(): void {
   window.ibisOfficeIccLoad = async () => icc;
   // The embed buttons are off (no set_embed_options): never called.
   window.ibisOfficeEmbedAction = () => undefined;
+  window.ibisOfficeExportPdf = exportPdfHandler(downloadPdf);
+}
+
+/**
+ * `exportPdf` as the editor calls `ibisOfficeExportPdf`: with its own copy of
+ * the bytes, a view on the wasm memory valid only during the call (see
+ * `editorSaveHandler`). Focus goes back to the editor either way. A cancel
+ * from the busy dialog rejects too, with "cancelled": the editor's status line
+ * then reads "Couldn't export to PDF: cancelled", where resolving would claim
+ * the PDF was exported.
+ */
+export function exportPdfHandler(exportPdf: (doc: PickedFile) => Promise<void>): (name: string, bytes: Uint8Array) => Promise<void> {
+  return async (name, bytes) => {
+    const doc = { name, bytes: bytes.slice() };
+    try {
+      await exportPdf(doc);
+    } finally {
+      focusEditor();
+    }
+  };
 }
 
 /**
