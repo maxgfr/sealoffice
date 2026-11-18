@@ -6,6 +6,7 @@ import { Autosaver, SaveSignal } from '../autosave';
 import { setSaveBeforeLock } from '../lock';
 import type { SealCrypto } from '../crypto';
 import { assetBase, editorSaveHandler, loadEditor, type EditorModule } from '../editor';
+import { installEditorHooks, openTabHandler } from '../bridge';
 import { alert, button, confirm, errorMessage, form, h } from '../ui';
 import type { Vault } from '../vault';
 import { importSessionKey } from './protocol';
@@ -176,6 +177,11 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
     await alert('Not in a live session', 'Leave the session to open another document.');
     return null;
   };
+  // File > New and the editor's logo would open another tab.
+  window.ibisOfficeOpenTab = openTabHandler(() => {
+    void alert('Not in a live session', 'Leave the session to open another document.');
+  });
+  installEditorHooks();
 
   // Typing while someone else holds the pen asks for it: it moves at once if they have paused.
   let askedAt = 0;
@@ -217,7 +223,7 @@ export async function bootLive(root: HTMLElement, deps: LiveDeps): Promise<void>
   document.documentElement.style.setProperty('--appbar', '0px');
   // Snapshots that came while the editor downloaded: start from the newest.
   const start = session.latest ?? first;
-  editor.run(assetBase(), start.name, start.bytes);
+  await editor.run(assetBase(), start.name, start.bytes);
   session.attachEditor(editor);
   autosaver = new Autosaver(editor, signal);
   // A lock (auto lock, or the library taken by another tab) reloads the page: the pen holder's edits go out first.

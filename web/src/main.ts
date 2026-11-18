@@ -231,12 +231,19 @@ async function boot(root: HTMLElement): Promise<void> {
   // The progress line reports a failed download; callers get the rejection too.
   editorLoad.then(() => status?.done(), (error: unknown) => status?.done(error));
 
-  let running: EditorModule | null = null;
+  /** The editor's start, once begun: later documents wait for it. */
+  let running: Promise<void> | null = null;
   let autosaver: Autosaver | null = null;
   const bridge = new Bridge(vault, async () => {
     // File > Open in the editor: the documents are on the home screen.
     await goHome();
     return null;
+  }, (kind) => {
+    // File > New makes the file in the library; the logo shows it.
+    (kind ? createDoc(kind) : goHome()).catch((error: unknown) => {
+      console.error(error);
+      void alert(kind ? 'Could not create the document' : 'Could not show the library', errorMessage(error));
+    });
   });
   const changed = (): void => {
     home.refresh();
@@ -298,10 +305,11 @@ async function boot(root: HTMLElement): Promise<void> {
     const editor = await editorLoad;
     bridge.track(doc);
     if (running) {
+      await running;
       editor.open_bytes(doc.name, doc.bytes);
     } else {
-      editor.run(assetBase(), doc.name, doc.bytes);
-      running = editor;
+      running = editor.run(assetBase(), doc.name, doc.bytes);
+      await running;
       autosaver = startAutosave(editor, bridge, appbar);
       actions.attachEditor({
         autosaver,

@@ -5,8 +5,11 @@ export type BlankKind = 'docx' | 'xlsx' | 'pptx';
 
 export interface EditorModule {
   default(init: { module_or_path: Response | Promise<Response> }): Promise<unknown>;
-  /** Starts the editor; only once per page. `assetBase` must be absolute. */
-  run(assetBase: string, fileName?: string, bytes?: Uint8Array): void;
+  /**
+   * Starts the editor; only once per page. `assetBase` must be absolute.
+   * Resolves once the editor is up: the other calls wait for it.
+   */
+  run(assetBase: string, fileName?: string, bytes?: Uint8Array): Promise<void>;
   blank_file(kind: BlankKind): Uint8Array;
   /** Whether the open document changed since it was loaded or last saved. */
   is_dirty(): boolean;

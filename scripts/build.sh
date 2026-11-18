@@ -79,8 +79,12 @@ cp fonts/IBMPlexSans-{Bold,Italic,BoldItalic}.ttf "$VENDOR/crates/ibis-office-ap
 # --- editor wasm ------------------------------------------------------------
 echo "==> editor ($PROFILE)"
 # wasm_thread needs a nightly feature on wasm32; allow it for that crate only.
+# The rest mirrors upstream's scripts/dist-profile.sh: the release defaults (its
+# Cargo.toml's release profile is for development) and no menu lines that are
+# not made yet.
 (
   cd "$VENDOR"
+  export CARGO_PROFILE_RELEASE_INCREMENTAL=false CARGO_PROFILE_RELEASE_LTO=false IBIS_OFFICE_DIST=1
   RUSTC_BOOTSTRAP=wasm_thread RUSTFLAGS="$REMAP --remap-path-prefix=$(pwd)=." CARGO_TARGET_DIR=target/dist \
     cargo rustc -p ibis-office-app --lib --crate-type cdylib --target wasm32-unknown-unknown ${FLAGS[@]+"${FLAGS[@]}"} -- \
     -C link-arg=-zstack-size=8388608
@@ -115,8 +119,8 @@ print(os.path.join(os.path.dirname(pkg["manifest_path"]), "assets", "icons"))')
 [[ -d "$ICONS_DIR" ]] || die "icons not found at $ICONS_DIR"
 cp -R "$ICONS_DIR" dist/assets/icons
 mkdir -p dist/assets/artborders
-unzip -q -o "$VENDOR/crates/ibis-office-app/data/artborders/OfficeOpenXML-WordprocessingMLArtBorders.zip" -d dist/assets/artborders
-cp "$VENDOR/crates/ibis-office-app/data/artborders/ECMA-NOTICE.txt" dist/assets/artborders/
+unzip -q -o "$VENDOR/crates/ibis-pptx/data/artborders/OfficeOpenXML-WordprocessingMLArtBorders.zip" -d dist/assets/artborders
+cp "$VENDOR/crates/ibis-pptx/data/artborders/ECMA-NOTICE.txt" dist/assets/artborders/
 
 # --- web page ---------------------------------------------------------------
 echo "==> web"

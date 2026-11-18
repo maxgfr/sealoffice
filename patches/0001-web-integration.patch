@@ -1,44 +1,48 @@
 diff --git a/crates/ibis-doc-model/src/command.rs b/crates/ibis-doc-model/src/command.rs
-index ee592e7..cd26f3c 100644
+index 81c0568..235f7c7 100644
 --- a/crates/ibis-doc-model/src/command.rs
 +++ b/crates/ibis-doc-model/src/command.rs
-@@ -945,11 +945,13 @@ pub struct Document {
-     presentation: Presentation,
-     undo: Vec<Vec<Command>>,
-     redo: Vec<Vec<Command>>,
+@@ -1098,6 +1098,8 @@ pub struct Document {
+     /// The file this document is saved as (its whole path), for what the calculation says of it
+     /// (`CELL("filename")`).
+     file: Option<String>,
 +    /// Bumped by every change to the presentation, undo and redo included.
 +    generation: u64,
  }
  
+ impl Default for Document {
+@@ -1108,7 +1110,7 @@ impl Default for Document {
+ 
  impl Document {
      pub fn new(presentation: Presentation) -> Self {
--        Self { presentation, undo: Vec::new(), redo: Vec::new() }
-+        Self { presentation, undo: Vec::new(), redo: Vec::new(), generation: 0 }
+-        Self { presentation, undo: Vec::new(), redo: Vec::new(), repeat_sheet:Vec::new(), repeat_sheet_group:false, clean_undo_len: Some(0), file: None }
++        Self { presentation, undo: Vec::new(), redo: Vec::new(), repeat_sheet:Vec::new(), repeat_sheet_group:false, clean_undo_len: Some(0), file: None, generation: 0 }
      }
  
-     pub fn presentation(&self) -> &Presentation {
-@@ -961,6 +963,12 @@ impl Document {
-         &mut self.presentation
-     }
- 
+     /// Mark the current state of the document as saved (clean).
+@@ -1129,6 +1131,13 @@ impl Document {
+     /// Mark the document as having unsaved changes.
+     pub fn mark_dirty(&mut self) {
+         self.clean_undo_len = None;
++        self.generation += 1;
++    }
++
 +    /// Changes with each edit, undo or redo: a presentation saved at one
 +    /// generation is unchanged while the generation is the same.
 +    pub fn generation(&self) -> u64 {
 +        self.generation
-+    }
-+
-     pub fn can_undo(&self) -> bool {
-         !self.undo.is_empty()
      }
-@@ -976,6 +984,7 @@ impl Document {
-         if !inverses.is_empty() {
+ 
+     /// Whether the document has unsaved changes since it was opened or last saved.
+@@ -1181,6 +1190,7 @@ impl Document {
+             }
              self.undo.push(inverses);
              self.redo.clear();
 +            self.generation += 1;
-         }
-         Ok(())
-     }
-@@ -996,6 +1005,7 @@ impl Document {
+             let same_target = self.repeat_sheet_group && !repeat.is_empty() && !self.repeat_sheet.is_empty() && repeat.iter().chain(&self.repeat_sheet).all(|edit|match (repeat.first(),edit) {
+                 (Some(crate::SheetCommand::SetFormat{slide:a,ranges:x,..}),crate::SheetCommand::SetFormat{slide:b,ranges:y,..}) => a==b && x==y,
+                 _ => false,
+@@ -1213,6 +1223,7 @@ impl Document {
              None => self.undo.push(inverses),
          }
          self.redo.clear();
@@ -46,15 +50,15 @@ index ee592e7..cd26f3c 100644
          Ok(())
      }
  
-@@ -1003,6 +1013,7 @@ impl Document {
-     /// user abandoned (such as a new text box left empty).
-     pub fn retract_last(&mut self) -> bool {
-         let Some(step) = self.undo.pop() else { return false };
+@@ -1223,6 +1234,7 @@ impl Document {
+         if self.clean_undo_len.is_some_and(|clean| clean > self.undo.len()) {
+             self.clean_undo_len = None;
+         }
 +        self.generation += 1;
          self.apply_all(step).is_ok()
      }
  
-@@ -1011,6 +1022,7 @@ impl Document {
+@@ -1231,6 +1243,7 @@ impl Document {
          match self.apply_all(step) {
              Ok(inverses) => {
                  self.redo.push(inverses);
@@ -62,7 +66,7 @@ index ee592e7..cd26f3c 100644
                  true
              }
              Err(_) => false,
-@@ -1022,6 +1034,7 @@ impl Document {
+@@ -1242,6 +1255,7 @@ impl Document {
          match self.apply_all(step) {
              Ok(inverses) => {
                  self.undo.push(inverses);
@@ -70,92 +74,11 @@ index ee592e7..cd26f3c 100644
                  true
              }
              Err(_) => false,
-diff --git a/crates/ibis-office-app/src/docx/editing.rs b/crates/ibis-office-app/src/docx/editing.rs
-index 9c71155..f9a3494 100644
---- a/crates/ibis-office-app/src/docx/editing.rs
-+++ b/crates/ibis-office-app/src/docx/editing.rs
-@@ -155,9 +155,9 @@ actions!(
- /// The keys of a document's text (Word's, with ⌘ on a Mac).
- pub(crate) fn key_bindings() -> Vec<KeyBinding> {
-     let c = Some(TEXT_CONTEXT);
--    let m = |k: &str| if cfg!(target_os = "macos") { format!("cmd-{k}") } else { format!("ctrl-{k}") };
--    let word = |k: &str| if cfg!(target_os = "macos") { format!("alt-{k}") } else { format!("ctrl-{k}") };
--    vec![
-+    let m = |k: &str| if crate::is_mac() { format!("cmd-{k}") } else { format!("ctrl-{k}") };
-+    let word = |k: &str| if crate::is_mac() { format!("alt-{k}") } else { format!("ctrl-{k}") };
-+    let mut bindings = vec![
-         KeyBinding::new("insert", ToggleOvertype, c),
-         KeyBinding::new("backspace", DeleteBackward, c),
-         KeyBinding::new("shift-backspace", DeleteBackward, c),
-@@ -198,10 +198,6 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
-         KeyBinding::new(&m("a"), SelectAll, c),
-         KeyBinding::new(&m("c"), Copy, c),
-         KeyBinding::new(&m("x"), Cut, c),
--        KeyBinding::new(&m("v"), Paste, c),
--        KeyBinding::new(&m("shift-v"), PastePlain, c),
--        KeyBinding::new("alt-cmd-shift-v", PasteMatchFormat, c),
--        KeyBinding::new("alt-ctrl-shift-v", PasteMatchFormat, c),
-         KeyBinding::new(&m("b"), ToggleBold, c),
-         KeyBinding::new(&m("i"), ToggleItalic, c),
-         KeyBinding::new(&m("u"), ToggleUnderline, c),
-@@ -254,8 +250,28 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
-         KeyBinding::new("ctrl-shift-f11", UnlockField, c),
-         KeyBinding::new("ctrl-shift-h", ToggleHidden, c),
-         KeyBinding::new(&m("shift-x"), ToggleHidden, c),
--        KeyBinding::new(if cfg!(target_os = "macos") { "alt-cmd-s" } else { "alt-ctrl-s" }, ToggleSplit, c),
--    ]
-+        KeyBinding::new(if crate::is_mac() { "alt-cmd-s" } else { "alt-ctrl-s" }, ToggleSplit, c),
-+    ];
-+    // In the browser a key's action cannot read the clipboard: a paste reaches
-+    // the document as the page's paste event, which only fires while ⌘V
-+    // (Ctrl+V) is left unbound.
-+    #[cfg(not(target_family = "wasm"))]
-+    bindings.extend([
-+        KeyBinding::new(&m("v"), Paste, c),
-+        KeyBinding::new(&m("shift-v"), PastePlain, c),
-+        KeyBinding::new("alt-cmd-shift-v", PasteMatchFormat, c),
-+        KeyBinding::new("alt-ctrl-shift-v", PasteMatchFormat, c),
-+    ]);
-+    // There a shifted symbol also arrives as the character it types (⌘⇧= as
-+    // ⌘⇧+ on a US layout), not as `shift-=`.
-+    #[cfg(target_family = "wasm")]
-+    bindings.extend([
-+        KeyBinding::new(&m("shift-+"), ToggleSuperscript, c),
-+        KeyBinding::new(&m("shift->"), GrowFont, c),
-+        KeyBinding::new(&m("shift-<"), ShrinkFont, c),
-+        KeyBinding::new(&m("shift-*"), ToggleFormattingMarks, c),
-+    ]);
-+    bindings
- }
- 
- /// A line of text on a page, from the layout (points from the page's
-diff --git a/crates/ibis-office-app/src/docx/toolbar.rs b/crates/ibis-office-app/src/docx/toolbar.rs
-index 9c459b3..822e508 100644
---- a/crates/ibis-office-app/src/docx/toolbar.rs
-+++ b/crates/ibis-office-app/src/docx/toolbar.rs
-@@ -1547,7 +1547,7 @@ pub(crate) fn menus(_editor: &SlideEditor, menus: &mut Menus) {
-             sub.items.push(MenuItem::tr("docx.text.small-caps").checked(text_style.as_ref().is_some_and(|s| s.small_caps)).disabled(!editing)
-                 .on(|this, _, cx| this.toggle_small_caps(cx)).into());
-             sub.items.push(MenuItem::tr("docx.text.hidden").checked(text_style.as_ref().is_some_and(|s| s.hidden))
--                .shortcut(if cfg!(target_os = "macos") { "⌘⇧X" } else { "Ctrl+Shift+H" })
-+                .shortcut(if crate::is_mac() { "⌘⇧X" } else { "Ctrl+Shift+H" })
-                 .disabled(!editing)
-                 .on(|this, _, cx| this.toggle_hidden(cx)).into());
-             sub.items.push(MenuItem::tr("docx.text.outline").checked(text_style.as_ref().is_some_and(|s| s.outline)).disabled(!editing)
-@@ -2361,7 +2361,7 @@ pub(crate) fn menus(_editor: &SlideEditor, menus: &mut Menus) {
-     table_menu.push(MenuItem::tr("docx.table.to-text").disabled(!_editor.can_table_to_text()).on(|this,_,cx|this.table_to_text(cx)).into());
-     table_menu.push(MenuItem::tr("docx.table.from-text").disabled(!_editor.can_text_to_table()).on(|this,_,cx|this.text_to_table(cx)).into());
-     table_menu.push(MenuItem::tr("docx.cell.split-grid").disabled(!_editor.can_split_cell_grid()).on(|this,_,cx|this.split_cell_grid(cx)).into());
--    table_menu.push(MenuItem::tr("docx.table.split").shortcut(if cfg!(target_os = "macos") { "⇧⌘↩" } else { "Ctrl+Shift+Enter" }).disabled(!_editor.can_split_table()).on(|this,_,cx|this.split_table(cx)).into());
-+    table_menu.push(MenuItem::tr("docx.table.split").shortcut(if crate::is_mac() { "⇧⌘↩" } else { "Ctrl+Shift+Enter" }).disabled(!_editor.can_split_table()).on(|this,_,cx|this.split_table(cx)).into());
-     table_menu.push(
-         crate::shell::chrome::Submenu::tr(
-             "docx.table.sort",
 diff --git a/crates/ibis-office-app/src/lib.rs b/crates/ibis-office-app/src/lib.rs
-index 75be011..58bf350 100644
+index 005e40b..fbaee6e 100644
 --- a/crates/ibis-office-app/src/lib.rs
 +++ b/crates/ibis-office-app/src/lib.rs
-@@ -908,7 +908,14 @@ mod web {
+@@ -691,7 +691,14 @@ mod web {
  
      /// UI font bundled with the app. The browser has no system fonts GPUI can
      /// load, and GPUI's `.SystemUIFont` alias resolves to IBM Plex Sans on web.
@@ -171,30 +94,23 @@ index 75be011..58bf350 100644
  
      /// Start the editor in the page. Icons are fetched from
      /// `<asset_base>/assets/icons/*.svg`. Pass an absolute URL such as
-@@ -919,11 +926,19 @@ mod web {
+@@ -702,13 +709,8 @@ mod web {
      /// cannot be read) the editor shows the start view.
      #[wasm_bindgen]
-     pub fn run(asset_base: Option<String>, file_name: Option<String>, file: Option<Vec<u8>>) -> Result<(), JsValue> {
+     pub async fn run(asset_base: Option<String>, file_name: Option<String>, file: Option<Vec<u8>>) -> Result<(), JsValue> {
 -        let document = file.and_then(|data| match ibis_pptx::read(&data) {
 -            Ok(presentation) => Some((presentation, file_name.unwrap_or_default().into())),
-+        // Opened with its source, so it can be saved; read only if that fails.
-+        let name: SharedString = file_name.unwrap_or_default().into();
-+        let document = file.and_then(|data| match ibis_pptx::open(data.clone()) {
-+            Ok(opened) => Some((opened.presentation, Some(Arc::new(opened.source)))),
-             Err(err) => {
-                 log::error!("{err}");
+-            Err(err) => {
+-                log::error!("{err}");
 -                None
-+                match ibis_pptx::read(&data) {
-+                    Ok(presentation) => Some((presentation, None)),
-+                    Err(err) => {
-+                        log::error!("{err}");
-+                        None
-+                    }
-+                }
-             }
-         });
-         gpui_kit::platform::web_init();
-@@ -953,11 +968,16 @@ mod web {
+-            }
+-        });
++        // Opened with its source, so it can be saved (`SlideEditor::open_web_file`).
++        let document: Option<(SharedString, Vec<u8>)> = file.map(|data| (file_name.unwrap_or_default().into(), data));
+         // The fonts downloaded with セットアップ are kept in the browser's IndexedDB; they are given to the text system when the
+         // first document is drawn (render::shape_view), so they are read before the editor starts.
+         crate::render::shape_view::set_web_fonts(crate::shell::web::load_downloaded_fonts().await);
+@@ -741,14 +743,16 @@ mod web {
  
          let handle = app.run_embedded(|cx| {
              cx.text_system()
@@ -203,27 +119,23 @@ index 75be011..58bf350 100644
                  .expect("failed to load the UI font");
              super::init(cx);
              Theme::global_mut(cx).font_family = "IBM Plex Sans".into();
+-            let blank = document.is_none().then(crate::shell::web::new_kind_of_address).flatten();
 -            super::open_editor(document, None, cx);
-+            super::open_window_with(cx, move |editor, window, cx| {
-+                if let Some((presentation, source)) = document {
-+                    editor.load(presentation, name, window, cx);
-+                    editor.source = source;
-+                }
-+            });
-         });
+-            if let Some(kind) = blank {
+-                crate::shell::app::new_file_in_page(kind, cx);
++            match document {
++                Some((name, data)) => super::open_window_with(cx, move |editor, window, cx| {
++                    editor.open_web_file(name, data, window, cx);
++                }),
++                // (Not `?new=`: the page makes new files itself, and reading the address takes `new Function`, which its CSP refuses.)
++                None => super::open_editor(None, None, cx),
+             }
+             // The fonts that can be downloaded, asked about at the first start of a version (セットアップ).
+             crate::shell::font_setup_dialog::start(cx);
+@@ -756,6 +760,71 @@ mod web {
          APPLICATION.with(|app| *app.borrow_mut() = Some(handle));
          Ok(())
-@@ -983,6 +1003,102 @@ mod web {
-         /// resolves to `{ name, bytes }`, or to `null` when cancelled.
-         #[wasm_bindgen(catch, js_name = ibisOfficePickFile)]
-         fn pick_file_js() -> Result<js_sys::Promise, JsValue>;
-+
-+        /// Defined by the page: stores `bytes` as the file `name` (asking for
-+        /// a new name when `save_as`) and resolves to the name it was stored
-+        /// under, or to `null` when cancelled.
-+        #[wasm_bindgen(catch, js_name = ibisOfficeSaveFile)]
-+        fn save_file_js(name: &str, bytes: &[u8], save_as: bool) -> Result<js_sys::Promise, JsValue>;
-+    }
+     }
 +
 +    /// A new empty file of `kind` (`docx`, `xlsx` or `pptx`).
 +    #[wasm_bindgen]
@@ -244,7 +156,7 @@ index 75be011..58bf350 100644
 +    /// which already holds the app and would borrow it twice.
 +    #[wasm_bindgen]
 +    pub fn is_dirty() -> bool {
-+        with_editor(|editor, _, _| editor.has_document && editor.document.generation() != editor.saved_generation).unwrap_or(false)
++        with_editor(|editor, _, _| editor.is_dirty()).unwrap_or(false)
 +    }
 +
 +    /// Save as ⌘S does. `false` when there is nothing that can be saved (no
@@ -268,33 +180,20 @@ index 75be011..58bf350 100644
 +    #[wasm_bindgen]
 +    pub fn open_bytes(name: String, bytes: Vec<u8>) {
 +        let name: SharedString = name.into();
-+        let opened = with_editor(|editor, window, cx| match ibis_pptx::open(bytes.clone()) {
-+            Ok(opened) => {
-+                editor.load(opened.presentation, name.clone(), window, cx);
-+                editor.source = Some(Arc::new(opened.source));
-+            }
-+            Err(err) => {
-+                log::error!("{err}");
-+                match ibis_pptx::read(&bytes) {
-+                    Ok(presentation) => editor.load(presentation, name.clone(), window, cx),
-+                    Err(err) => editor.set_status(crate::shell::i18n::format("file.open-failed", &[("name", &name), ("error", &err)]), cx),
-+                }
-+            }
-+        });
-+        if opened.is_none() {
++        if with_editor(|editor, window, cx| editor.open_web_file(name.clone(), bytes, window, cx)).is_none() {
 +            log::error!("no editor to open {name} in");
 +        }
 +    }
 +
 +    /// Run `f` on the active window's editor; `None` before `run` or without one.
-+    fn with_editor<R>(f: impl FnOnce(&mut crate::shell::editor::SlideEditor, &mut Window, &mut Context<crate::shell::editor::SlideEditor>) -> R) -> Option<R> {
++    fn with_editor<R>(f: impl FnOnce(&mut crate::SlideEditor, &mut Window, &mut Context<crate::SlideEditor>) -> R) -> Option<R> {
 +        APPLICATION.with(|app| {
 +            let app = app.borrow();
 +            app.as_ref()?.update(|cx| {
 +                let window = cx.active_window().or_else(|| cx.windows().first().copied())?;
 +                let root = window.downcast::<gpui_kit::component::Root>()?;
 +                root.update(cx, |root, window, cx| {
-+                    let editor = root.view().clone().downcast::<crate::shell::editor::SlideEditor>().ok()?;
++                    let editor = root.view().clone().downcast::<crate::SlideEditor>().ok()?;
 +                    Some(editor.update(cx, |editor, cx| f(editor, window, cx)))
 +                })
 +                .ok()
@@ -302,131 +201,317 @@ index 75be011..58bf350 100644
 +            })
 +        })
 +    }
-+
-+    /// Hand the page a saved file; the name it was stored under, or `None` if cancelled.
-+    pub(crate) async fn save_file(name: String, bytes: Vec<u8>, save_as: bool) -> Result<Option<String>, String> {
-+        let describe = |err: JsValue| {
-+            err.as_string()
-+                .or_else(|| err.dyn_ref::<js_sys::Error>().map(|e| String::from(e.message())))
-+                .unwrap_or_else(|| format!("{err:?}"))
-+        };
-+        let promise = save_file_js(&name, &bytes, save_as).map_err(describe)?;
-+        let value = wasm_bindgen_futures::JsFuture::from(promise).await.map_err(describe)?;
-+        Ok(value.as_string())
+ }
+ 
+ #[cfg(all(test, not(target_family = "wasm")))]
+diff --git a/crates/ibis-office-docx/src/editing.rs b/crates/ibis-office-docx/src/editing.rs
+index f4ce289..d7b2247 100644
+--- a/crates/ibis-office-docx/src/editing.rs
++++ b/crates/ibis-office-docx/src/editing.rs
+@@ -190,10 +190,12 @@ actions!(
+ pub fn key_bindings() -> Vec<KeyBinding> {
+     let c = Some(TEXT_CONTEXT);
+     let p = Some(super::find::FIND_PANEL_CONTEXT);
+-    let m = |k: &str| if cfg!(target_os = "macos") { format!("cmd-{k}") } else { format!("ctrl-{k}") };
+-    let word = |k: &str| if cfg!(target_os = "macos") { format!("alt-{k}") } else { format!("ctrl-{k}") };
+-    let outline = |k: &str| if cfg!(target_os = "macos") { format!("ctrl-shift-{k}") } else { format!("alt-shift-{k}") };
+-    vec![
++    // The browser's platform, not the build target's: the web build runs on a Mac too.
++    let mac = crate::shell::app::is_mac();
++    let m = |k: &str| if mac { format!("cmd-{k}") } else { format!("ctrl-{k}") };
++    let word = |k: &str| if mac { format!("alt-{k}") } else { format!("ctrl-{k}") };
++    let outline = |k: &str| if mac { format!("ctrl-shift-{k}") } else { format!("alt-shift-{k}") };
++    let mut bindings = vec![
+         KeyBinding::new(&word("backspace"), DeleteWordBackward, c),
+         KeyBinding::new(&word("delete"), DeleteWordForward, c),
+         KeyBinding::new("pageup", PageUp, c),
+@@ -203,14 +205,14 @@ pub fn key_bindings() -> Vec<KeyBinding> {
+         KeyBinding::new(&m("1"), LineSpacingSingle, c),
+         KeyBinding::new(&m("5"), LineSpacingOneAndHalf, c),
+         KeyBinding::new(&m("2"), LineSpacingDouble, c),
+-        KeyBinding::new(&(if cfg!(target_os = "macos") { "alt-cmd-1" } else { "alt-ctrl-1" }), ApplyHeading1, c),
+-        KeyBinding::new(&(if cfg!(target_os = "macos") { "alt-cmd-2" } else { "alt-ctrl-2" }), ApplyHeading2, c),
+-        KeyBinding::new(&(if cfg!(target_os = "macos") { "alt-cmd-3" } else { "alt-ctrl-3" }), ApplyHeading3, c),
++        KeyBinding::new(&(if mac { "alt-cmd-1" } else { "alt-ctrl-1" }), ApplyHeading1, c),
++        KeyBinding::new(&(if mac { "alt-cmd-2" } else { "alt-ctrl-2" }), ApplyHeading2, c),
++        KeyBinding::new(&(if mac { "alt-cmd-3" } else { "alt-ctrl-3" }), ApplyHeading3, c),
+         KeyBinding::new(&m("shift-n"), ApplyNormalStyle, c),
+         KeyBinding::new(&m("shift-d"), ToggleDoubleUnderline, c),
+         KeyBinding::new(&m("shift-w"), ToggleWordUnderline, c),
+-        KeyBinding::new(&(if cfg!(target_os = "macos") { "alt-cmd-f" } else { "alt-ctrl-f" }), InsertFootnote, c),
+-        KeyBinding::new(&(if cfg!(target_os = "macos") { "alt-cmd-e" } else { "alt-ctrl-e" }), InsertEndnote, c),
++        KeyBinding::new(&(if mac { "alt-cmd-f" } else { "alt-ctrl-f" }), InsertFootnote, c),
++        KeyBinding::new(&(if mac { "alt-cmd-e" } else { "alt-ctrl-e" }), InsertEndnote, c),
+         KeyBinding::new(&m("shift-l"), ToggleBulletList, c),
+         KeyBinding::new(&outline("left"), OutlinePromote, c),
+         KeyBinding::new(&outline("right"), OutlineDemote, c),
+@@ -256,9 +258,16 @@ pub fn key_bindings() -> Vec<KeyBinding> {
+         KeyBinding::new(&m("a"), SelectAll, c),
+         KeyBinding::new(&m("c"), Copy, c),
+         KeyBinding::new(&m("x"), Cut, c),
++        // In the browser a key's action cannot read the clipboard: a paste reaches
++        // the document as the page's paste event, which only fires while ⌘V
++        // (Ctrl+V) is left unbound.
++        #[cfg(not(target_family = "wasm"))]
+         KeyBinding::new(&m("v"), Paste, c),
++        #[cfg(not(target_family = "wasm"))]
+         KeyBinding::new(&m("shift-v"), PastePlain, c),
++        #[cfg(not(target_family = "wasm"))]
+         KeyBinding::new("alt-cmd-shift-v", PasteMatchFormat, c),
++        #[cfg(not(target_family = "wasm"))]
+         KeyBinding::new("alt-ctrl-shift-v", PasteMatchFormat, c),
+         KeyBinding::new(&m("b"), ToggleBold, c),
+         KeyBinding::new(&m("i"), ToggleItalic, c),
+@@ -282,20 +291,11 @@ pub fn key_bindings() -> Vec<KeyBinding> {
+         KeyBinding::new(&m("f"), OpenFind, c),
+         KeyBinding::new(&m("k"), OpenLink, c),
+         KeyBinding::new(&m("shift-h"), OpenFind, c),
+-        // ⌘G / ⇧⌘G are Mac only (Windows and Linux: F3 / Shift+F3; Ctrl+G is not Find Next).
+-        #[cfg(target_os = "macos")]
+-        KeyBinding::new("cmd-g", FindNext, c),
+-        #[cfg(target_os = "macos")]
+-        KeyBinding::new("cmd-shift-g", FindPrevious, c),
+         KeyBinding::new("f3", FindNext, c),
+         KeyBinding::new("shift-f3", FindPrevious, c),
+         // The same keys with the focus in the find panel's fields.
+         KeyBinding::new(&m("f"), OpenFind, p),
+         KeyBinding::new(&m("shift-h"), OpenFind, p),
+-        #[cfg(target_os = "macos")]
+-        KeyBinding::new("cmd-g", FindNext, p),
+-        #[cfg(target_os = "macos")]
+-        KeyBinding::new("cmd-shift-g", FindPrevious, p),
+         KeyBinding::new("f3", FindNext, p),
+         KeyBinding::new("shift-f3", FindPrevious, p),
+         KeyBinding::new("alt-cmd-g", OpenGoTo, c),
+@@ -325,8 +325,27 @@ pub fn key_bindings() -> Vec<KeyBinding> {
+         KeyBinding::new("ctrl-shift-f11", UnlockField, c),
+         KeyBinding::new("ctrl-shift-h", ToggleHidden, c),
+         KeyBinding::new(&m("shift-x"), ToggleHidden, c),
+-        KeyBinding::new(if cfg!(target_os = "macos") { "alt-cmd-s" } else { "alt-ctrl-s" }, ToggleSplit, None),
+-    ]
++        KeyBinding::new(if mac { "alt-cmd-s" } else { "alt-ctrl-s" }, ToggleSplit, None),
++    ];
++    // ⌘G / ⇧⌘G are Mac only (Windows and Linux: F3 / Shift+F3; Ctrl+G is not Find Next).
++    if mac {
++        bindings.extend([
++            KeyBinding::new("cmd-g", FindNext, c),
++            KeyBinding::new("cmd-shift-g", FindPrevious, c),
++            KeyBinding::new("cmd-g", FindNext, p),
++            KeyBinding::new("cmd-shift-g", FindPrevious, p),
++        ]);
++    }
++    // In the browser a shifted symbol also arrives as the character it types (⌘⇧= as
++    // ⌘⇧+ on a US layout), not as `shift-=`.
++    #[cfg(target_family = "wasm")]
++    bindings.extend([
++        KeyBinding::new(&m("shift-+"), ToggleSuperscript, c),
++        KeyBinding::new(&m("shift->"), GrowFont, c),
++        KeyBinding::new(&m("shift-<"), ShrinkFont, c),
++        KeyBinding::new(&m("shift-*"), ToggleFormattingMarks, c),
++    ]);
++    bindings
+ }
+ 
+ /// A line of text on a page, from the layout (points from the page's
+diff --git a/crates/ibis-office-docx/src/lib.rs b/crates/ibis-office-docx/src/lib.rs
+index 8f959a1..339ae3e 100644
+--- a/crates/ibis-office-docx/src/lib.rs
++++ b/crates/ibis-office-docx/src/lib.rs
+@@ -513,7 +513,6 @@ impl FormatEditor for Document {
      }
  
-     /// Let the user choose a file; its name and contents, or `None` if cancelled.
-diff --git a/crates/ibis-office-app/src/shell/editor.rs b/crates/ibis-office-app/src/shell/editor.rs
-index 4ac2294..7bd1195 100644
---- a/crates/ibis-office-app/src/shell/editor.rs
-+++ b/crates/ibis-office-app/src/shell/editor.rs
-@@ -331,6 +331,9 @@ pub struct SlideEditor {
-     #[cfg(target_os = "windows")]
-     wheel_notches: f32,
-     pub(crate) document: Document,
-+    /// The document's generation when it was last opened or saved; it has
-+    /// unsaved edits while its generation differs.
-+    pub(crate) saved_generation: u64,
-     pub(crate) current_slide: SlideId,
-     pub(crate) selection: Option<ShapeId>,
-     pub(crate) tool: Tool,
-@@ -541,6 +544,7 @@ impl SlideEditor {
-             #[cfg(target_os = "windows")]
-             wheel_notches: 0.0,
-             document: Document::new(presentation),
-+            saved_generation: 0,
-             current_slide,
-             selection: None,
-             tool: Tool::Select,
-@@ -657,6 +661,7 @@ impl SlideEditor {
-         let is_reading = presentation.flow.as_ref().is_some_and(|f| f.view_mode == ibis_doc_model::DocumentViewMode::Reading);
-         let is_outline = presentation.flow.as_ref().is_some_and(|f| f.view_mode == ibis_doc_model::DocumentViewMode::Outline);
-         self.document = Document::new(presentation);
-+        self.saved_generation = self.document.generation();
-         self.source = None;
-         #[cfg(not(target_family = "wasm"))]
-         {
-@@ -1445,6 +1450,7 @@ impl SlideEditor {
-             };
-             let pres = self.presentation().clone();
-             let doc = self.document.clone();
-+            let saved_generation = self.saved_generation;
-             let name = self.file_name.clone().unwrap_or_else(|| self.workbook_display_name().into());
-             let path = self.file_path();
-             let source = self.source.clone();
-@@ -1458,6 +1464,7 @@ impl SlideEditor {
-             crate::open_window_with(cx, move |editor, window, cx| {
-                 editor.load(pres, name.clone(), window, cx);
-                 editor.document = doc;
-+                editor.saved_generation = saved_generation;
-                 editor.set_file_path(path);
-                 editor.source = source;
-                 editor.workbook_id = wb_id;
-@@ -1477,6 +1484,7 @@ impl SlideEditor {
-             };
-             let pres = self.presentation().clone();
-             let doc = self.document.clone();
-+            let saved_generation = self.saved_generation;
-             let name = self.file_name.clone().unwrap_or_else(|| crate::shell::i18n::text("_shell.document-1-docx").into());
-             let path = self.file_path();
-             let source = self.source.clone();
-@@ -1490,6 +1498,7 @@ impl SlideEditor {
-             crate::open_window_with(cx, move |editor, window, cx| {
-                 editor.load(pres, name.clone(), window, cx);
-                 editor.document = doc;
-+                editor.saved_generation = saved_generation;
-                 editor.set_file_path(path);
-                 editor.source = source;
-                 editor.document_id = doc_id;
-diff --git a/crates/ibis-office-app/src/shell/save.rs b/crates/ibis-office-app/src/shell/save.rs
-index 8698efe..5f6cef0 100644
---- a/crates/ibis-office-app/src/shell/save.rs
-+++ b/crates/ibis-office-app/src/shell/save.rs
-@@ -29,11 +29,7 @@ impl SlideEditor {
+     /// A document as .odt (OpenDocument) and as a template (.dotx, .dotm).
+-    #[cfg(not(target_family = "wasm"))]
+     fn bytes_for_path(editor: &SlideEditor, path: &std::path::Path, source: &ibis_pptx::Source, copy: bool) -> Option<Result<crate::shell::format::FileBytes, String>> {
+         use crate::shell::format::FileBytes;
+         let extension = path.extension()?;
+diff --git a/crates/ibis-office-docx/src/toolbar.rs b/crates/ibis-office-docx/src/toolbar.rs
+index 27b5cc1..753bb74 100644
+--- a/crates/ibis-office-docx/src/toolbar.rs
++++ b/crates/ibis-office-docx/src/toolbar.rs
+@@ -2483,7 +2483,7 @@ pub(crate) fn menus(_editor: &SlideEditor, menus: &mut Menus) {
+             sub.items.push(MenuItem::tr("docx.text.small-caps").checked(text_style.as_ref().is_some_and(|s| s.small_caps)).disabled(!editing)
+                 .on(|this, _, cx| this.toggle_small_caps(cx)).into());
+             sub.items.push(MenuItem::tr("docx.text.hidden").checked(text_style.as_ref().is_some_and(|s| s.hidden))
+-                .shortcut(if cfg!(target_os = "macos") { "⌘⇧X" } else { "Ctrl+Shift+H" })
++                .shortcut(if crate::shell::app::is_mac() { "⌘⇧X" } else { "Ctrl+Shift+H" })
+                 .disabled(!editing)
+                 .on(|this, _, cx| this.toggle_hidden(cx)).into());
+             sub.items.push(MenuItem::tr("docx.text.outline").checked(text_style.as_ref().is_some_and(|s| s.outline)).disabled(!editing)
+@@ -3847,7 +3847,7 @@ pub(crate) fn menus(_editor: &SlideEditor, menus: &mut Menus) {
+     table_menu.push(MenuItem::tr("docx.table.to-text").disabled(!_editor.can_table_to_text()).on(|this,_,cx|this.table_to_text(cx)).into());
+     table_menu.push(MenuItem::tr("docx.table.from-text").disabled(!_editor.can_text_to_table()).on(|this,_,cx|this.text_to_table(cx)).into());
+     table_menu.push(MenuItem::tr("docx.cell.split-grid").disabled(!_editor.can_split_cell_grid()).on(|this,_,cx|this.split_cell_grid(cx)).into());
+-    table_menu.push(MenuItem::tr("docx.table.split").shortcut(if cfg!(target_os = "macos") { "⇧⌘↩" } else { "Ctrl+Shift+Enter" }).disabled(!_editor.can_split_table()).on(|this,_,cx|this.split_table(cx)).into());
++    table_menu.push(MenuItem::tr("docx.table.split").shortcut(if crate::shell::app::is_mac() { "⇧⌘↩" } else { "Ctrl+Shift+Enter" }).disabled(!_editor.can_split_table()).on(|this,_,cx|this.split_table(cx)).into());
+     table_menu.push(
+         crate::shell::chrome::Submenu::tr(
+             "docx.table.sort",
+diff --git a/crates/ibis-office-pptx/src/lib.rs b/crates/ibis-office-pptx/src/lib.rs
+index cb01edb..290cc3c 100644
+--- a/crates/ibis-office-pptx/src/lib.rs
++++ b/crates/ibis-office-pptx/src/lib.rs
+@@ -319,7 +319,6 @@ impl FormatEditor for Presentation {
+     }
+ 
+     /// A presentation as .odp (OpenDocument), as a template, as a slide show (.ppsx) and as .pptx (whatever it was opened as).
+-    #[cfg(not(target_family = "wasm"))]
+     fn bytes_for_path(editor: &SlideEditor, path: &std::path::Path, source: &ibis_pptx::Source, copy: bool) -> Option<Result<crate::shell::format::FileBytes, String>> {
+         use crate::shell::format::FileBytes;
+         // Every kind of file made here (.odp, templates, slide shows, packages) is refused while the master view or the notes formatting is open.
+diff --git a/crates/ibis-office-shell/src/chrome.rs b/crates/ibis-office-shell/src/chrome.rs
+index 17bb65c..9fd7fe8 100644
+--- a/crates/ibis-office-shell/src/chrome.rs
++++ b/crates/ibis-office-shell/src/chrome.rs
+@@ -1070,8 +1070,9 @@ pub(crate) fn format_shortcut_for_target(shortcut: &str, is_macos: bool) -> Stri
+     out
+ }
+ 
++/// In the keys' form of the platform that runs it (the browser's, in the web build).
+ pub(crate) fn format_shortcut_for_platform(shortcut: &str) -> String {
+-    format_shortcut_for_target(shortcut, cfg!(target_os = "macos"))
++    format_shortcut_for_target(shortcut, crate::app::is_mac())
+ }
+ 
+ /// The navigation buttons of the find panel (the document, spreadsheet and presentation screens share them): 前へ, 次へ and (spreadsheet) 全て.
+@@ -1095,7 +1096,7 @@ impl FindNav {
+     /// The key that does the same as the button on every screen: ⌘G / ⇧⌘G on a Mac (also with the panel closed), Enter / Shift+Enter in the
+     /// panel's field elsewhere. 全て has no key.
+     fn shortcut(self) -> Option<String> {
+-        let mac = cfg!(target_os = "macos");
++        let mac = crate::app::is_mac();
+         let key = match (self, mac) {
+             (FindNav::Next, true) => "⌘G",
+             (FindNav::Previous, true) => "⇧⌘G",
+diff --git a/crates/ibis-office-shell/src/editor.rs b/crates/ibis-office-shell/src/editor.rs
+index 42d5301..81406cf 100644
+--- a/crates/ibis-office-shell/src/editor.rs
++++ b/crates/ibis-office-shell/src/editor.rs
+@@ -1076,6 +1076,33 @@ impl SlideEditor {
+         .detach();
+     }
+ 
++    /// In the browser: open `data`, the file `name` the page hands over, in place of the open document. Opened with its
++    /// source, so it can be saved (as the file picker's are); only read, so not savable, if that fails. False when it
++    /// cannot be read at all (told in the status bar).
++    #[cfg(target_family = "wasm")]
++    pub fn open_web_file(&mut self, name: SharedString, data: Vec<u8>, window: &mut Window, cx: &mut Context<Self>) -> bool {
++        let error = match ibis_pptx::open(data.clone()) {
++            Ok(opened) => {
++                self.load(opened.presentation, name, window, cx);
++                self.set_loaded_source(std::sync::Arc::new(opened.source));
++                with_format!(self, file_opened(self));
++                return true;
++            }
++            Err(err) => err,
++        };
++        log::error!("{error}");
++        match ibis_pptx::read(&data) {
++            Ok(presentation) => {
++                self.load(presentation, name, window, cx);
++                true
++            }
++            Err(err) => {
++                self.set_status(crate::i18n::format("file.open-failed", &[("name", &name), ("error", &err)]), cx);
++                false
++            }
++        }
++    }
++
+     /// Open the .pptx, .xlsx or .docx at `path` and put it first in the
+     /// recent files, then show slide `slide` (1-based) if given. A window
+     /// with no document shows an empty one of the file's kind while it
+diff --git a/crates/ibis-office-shell/src/format.rs b/crates/ibis-office-shell/src/format.rs
+index 5f1d706..a9e4465 100644
+--- a/crates/ibis-office-shell/src/format.rs
++++ b/crates/ibis-office-shell/src/format.rs
+@@ -212,8 +212,8 @@ pub struct ShapeRules {
+ 
+ /// What is written to a file whose extension is not the format's own package (`FormatEditor::bytes_for_path`): the bytes, whether
+ /// the file's password may encrypt them (an OOXML package), and, for a kind of file the format has something to say of after a
+-/// save, what the status bar says in place of 「保存しました」 (`Some(None)`: nothing this time).
+-#[cfg(not(target_family = "wasm"))]
++/// save, what the status bar says in place of 「保存しました」 (`Some(None)`: nothing this time). In the web build too: its save hands
++/// the page the same bytes (`SlideEditor::web_bytes`).
+ pub struct FileBytes {
+     pub bytes: Vec<u8>,
+     pub protect: bool,
+@@ -1058,7 +1058,6 @@ pub trait FormatEditor {
+     /// What is written to `path` when its extension is not written as the format's own package (a workbook as .csv, a
+     /// presentation as .ppsx, a template): None for the format's own (`Source::save` of `model_for_save`, which the file's
+     /// password encrypts). `copy`: the file is written beside its own (the AutoRecover snapshot, a backup), not saved.
+-    #[cfg(not(target_family = "wasm"))]
+     fn bytes_for_path(_editor: &SlideEditor, _path: &std::path::Path, _source: &ibis_pptx::Source, _copy: bool) -> Option<Result<FileBytes, String>> {
+         None
+     }
+@@ -1429,7 +1428,6 @@ pub trait FormatDriver: Sync {
+     fn prepare_print_or_export(&self, _editor: &mut SlideEditor, _cx: &mut Context<SlideEditor>);
+     #[cfg(not(target_family = "wasm"))]
+     fn pdf_job(&self, editor: &SlideEditor, _printing: bool) -> Result<PdfJob, String>;
+-    #[cfg(not(target_family = "wasm"))]
+     fn bytes_for_path(&self, _editor: &SlideEditor, _path: &std::path::Path, _source: &ibis_pptx::Source, _copy: bool) -> Option<Result<FileBytes, String>>;
+     #[cfg(not(target_family = "wasm"))]
+     fn new_file_save_folder(&self, _editor: &SlideEditor) -> Option<std::path::PathBuf>;
+@@ -1981,7 +1979,6 @@ impl<F: FormatEditor> FormatDriver for Driver<F> {
+     fn pdf_job(&self, editor: &SlideEditor, _printing: bool) -> Result<PdfJob, String> {
+         F::pdf_job(editor, _printing)
+     }
+-    #[cfg(not(target_family = "wasm"))]
+     fn bytes_for_path(&self, _editor: &SlideEditor, _path: &std::path::Path, _source: &ibis_pptx::Source, _copy: bool) -> Option<Result<FileBytes, String>> {
+         F::bytes_for_path(_editor, _path, _source, _copy)
+     }
+diff --git a/crates/ibis-office-shell/src/save.rs b/crates/ibis-office-shell/src/save.rs
+index e135742..b07035e 100644
+--- a/crates/ibis-office-shell/src/save.rs
++++ b/crates/ibis-office-shell/src/save.rs
+@@ -85,11 +85,7 @@ impl SlideEditor {
              None => self.save_as(&SaveAs, window, cx),
          }
          #[cfg(target_family = "wasm")]
 -        {
 -            let _ = window;
--            self.status = Some(crate::shell::i18n::text("_shell.saving-is-not-yet-available-in-the-browser-versi").into());
+-            self.status = Some(crate::i18n::text("_shell.saving-is-not-yet-available-in-the-browser-versi").into());
 -            cx.notify();
 -        }
-+        self.save_web(false, window, cx);
++        self.save_web(false, window, cx, |_, _, _| {});
      }
  
      /// ⌘⇧S: ask where, and save there.
-@@ -70,21 +66,52 @@ impl SlideEditor {
+@@ -143,11 +139,7 @@ impl SlideEditor {
              .detach();
          }
          #[cfg(target_family = "wasm")]
 -        {
--            let _ = window;
--            self.status = Some(crate::shell::i18n::text("_shell.saving-is-not-yet-available-in-the-browser-versi").into());
+-            let _ = (window, then);
+-            self.status = Some(crate::i18n::text("_shell.saving-is-not-yet-available-in-the-browser-versi").into());
 -            cx.notify();
 -        }
-+        self.save_web(true, window, cx);
++        self.save_web(true, window, cx, then);
      }
  
--    /// Save to `path`, and make it the file's path.
--    #[cfg(not(target_family = "wasm"))]
--    pub(crate) fn save_to(&mut self, path: std::path::PathBuf, window: &mut Window) -> Result<(), String> {
-+    /// In the browser: the file's bytes handed to the page (`ibisOfficeSaveFile`),
-+    /// which stores them and answers the name they were stored under.
+     /// Save (as ⌘S, asking where for a file that has no path yet) and then, once the file is written, `then` (the
+@@ -203,11 +195,66 @@ impl SlideEditor {
+             .detach();
+         }
+         #[cfg(target_family = "wasm")]
+-        {
+-            let _ = (window, then);
+-            self.status = Some(crate::i18n::text("_shell.saving-is-not-yet-available-in-the-browser-versi").into());
+-            cx.notify();
++        self.save_web(false, window, cx, then);
++    }
++
++    /// In the browser: the file's bytes handed to the page (`ibisOfficeSaveFile`), which stores them (asking for a new name
++    /// when `save_as`) and answers the name they were stored under; then `then`. A cancelled or failed save does not go on
++    /// to `then`.
 +    #[cfg(target_family = "wasm")]
-+    fn save_web(&mut self, save_as: bool, window: &mut Window, cx: &mut Context<Self>) {
-+        let name = match (&self.source, &self.file_name) {
-+            (Some(_), Some(name)) => name.to_string(),
-+            _ => {
-+                self.status = Some(crate::shell::i18n::text("_shell.saving-new-documents-is-not-yet-supported").into());
-+                return cx.notify();
-+            }
-+        };
-+        // The edits saved are those made before the bytes; later ones stay unsaved.
-+        let generation = self.document.generation();
-+        let bytes = match self.save_bytes(&name) {
-+            Ok(bytes) => bytes,
++    fn save_web(&mut self, save_as: bool, window: &mut Window, cx: &mut Context<Self>, then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static) {
++        let (name, bytes) = match self.web_bytes(window, cx) {
++            Ok(file) => file,
 +            Err(err) => return self.report_save(Err(err), cx),
 +        };
++        // The edits saved are those made before the bytes: one made while the page stores them keeps the document unsaved.
++        let generation = self.document.generation();
 +        cx.spawn_in(window, async move |this, cx| {
 +            let result = crate::web::save_file(name, bytes, save_as).await;
 +            this.update_in(cx, |this, window, cx| match result {
@@ -434,8 +519,11 @@ index 8698efe..5f6cef0 100644
 +                    let name: SharedString = name.into();
 +                    window.set_window_title(&format!("{name} - ibisOffice"));
 +                    this.file_name = Some(name);
-+                    this.saved_generation = generation;
++                    if this.document.generation() == generation {
++                        this.document.mark_clean();
++                    }
 +                    this.report_save(Ok(()), cx);
++                    then(this, window, cx);
 +                }
 +                Ok(None) => {}
 +                Err(err) => this.report_save(Err(err), cx),
@@ -445,57 +533,110 @@ index 8698efe..5f6cef0 100644
 +        .detach();
 +    }
 +
-+    /// The file's bytes, in the format `name`'s extension names.
-+    pub(crate) fn save_bytes(&mut self, name: &str) -> Result<Vec<u8>, String> {
-         // The master view is closed first: what is saved is the file, with what was made in it.
-         if self.is_master_view() || self.is_page_view() {
-             return Err(crate::shell::i18n::text("_shell.close-slide-master-view-and-notes-formatting-bef").to_string());
++    /// In the browser: the open file's name and the bytes it is saved as, written as `save_to` writes them for a file of that
++    /// name (the format's own package, or what the format writes under its extension: a workbook's .csv is the sheet shown).
++    /// What is typed and not yet entered is put in first. An error when the format refuses a save for now, or for a file
++    /// with no source or no name.
++    #[cfg(target_family = "wasm")]
++    pub fn web_bytes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<(String, Vec<u8>), String> {
++        self.commit_pending_edit(window, cx);
++        if let Some(why) = crate::format::with_format!(self, save_refused(self)) {
++            return Err(why);
          }
-         let source = self.source.clone().ok_or(crate::shell::i18n::text("_shell.saving-new-documents-is-not-yet-supported").to_string())?;
-+        let path = std::path::Path::new(name);
-         // A workbook saved as .csv: the sheet shown, as CSV (Excel's 「CSV UTF-8」).
-         let csv = self.is_workbook() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv"));
-         let tsv = self.is_workbook() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("tsv") || e.eq_ignore_ascii_case("tab") || e.eq_ignore_ascii_case("txt"));
-@@ -93,7 +120,7 @@ impl SlideEditor {
-         let potx = self.is_presentation() && path.extension().and_then(|e| e.to_str()).is_some_and(ibis_pptx::is_template);
-         let dotx = self.is_document() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("dotx") || e.eq_ignore_ascii_case("dotm"));
-         let pptx = self.is_presentation() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pptx") || e.eq_ignore_ascii_case("pptm"));
--        let bytes = if csv {
-+        Ok(if csv {
-             let index = self.presentation().slide_index(self.current_slide).unwrap_or(0);
-             ibis_pptx::csv::sheet_to_csv(self.presentation(), index)
-         } else if tsv {
-@@ -107,7 +134,16 @@ impl SlideEditor {
-             source.save_presentation(self.presentation(), ibis_pptx::SaveOptions::default()).map_err(|e| e.to_string())?
-         } else {
-             source.save(self.presentation(), ibis_pptx::SaveOptions::default()).map_err(|e| e.to_string())?
--        };
-+        })
-+    }
-+
-+    /// Save to `path`, and make it the file's path.
-+    #[cfg(not(target_family = "wasm"))]
-+    pub(crate) fn save_to(&mut self, path: std::path::PathBuf, window: &mut Window) -> Result<(), String> {
-+        let generation = self.document.generation();
-+        let bytes = self.save_bytes(&path.to_string_lossy())?;
-+        let csv = self.is_workbook() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv"));
-+        let tsv = self.is_workbook() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("tsv") || e.eq_ignore_ascii_case("tab") || e.eq_ignore_ascii_case("txt"));
-         if self.is_workbook() {
-             let override_opt = self.sheet_state().and_then(|s| s.always_create_backup);
-             if let Ok(Some(backup_path)) = crate::xlsx::backup_save::create_backup_copy_if_enabled(&path, override_opt) {
-@@ -121,6 +157,7 @@ impl SlideEditor {
-         window.set_window_title(&format!("{name} - ibisOffice"));
-         self.file_name = Some(name);
-         self.path = Some(path);
-+        self.saved_generation = generation;
-         if self.is_workbook() || self.is_presentation() {
-             self.cleanup_active_autorecover_file();
-             self.is_recovered = false;
-@@ -129,7 +166,6 @@ impl SlideEditor {
++        let (Some(source), Some(name)) = (self.source.clone(), self.file_name.clone()) else {
++            return Err(crate::i18n::text("_shell.saving-new-documents-is-not-yet-supported").to_string());
++        };
++        let path = std::path::Path::new(name.as_ref());
++        let bytes = match crate::format::with_format!(self, bytes_for_path(self, path, &source, false)) {
++            Some(other) => {
++                let other = other?;
++                if let Some(note) = other.note {
++                    self.save_note = note;
++                }
++                other.bytes
++            }
++            None => source.save(&self.presentation_for_save(), ibis_pptx::SaveOptions::default()).map_err(|e| e.to_string())?,
++        };
++        Ok((name.to_string(), bytes))
+     }
+ 
+     /// The folder 名前を付けて保存 opens in: the file's own folder, or (a new file) `new_file_save_folder`.
+@@ -283,7 +330,6 @@ impl SlideEditor {
          Ok(())
      }
  
 -    #[cfg(not(target_family = "wasm"))]
      fn report_save(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
          self.status = Some(match result {
-             Ok(()) => crate::shell::i18n::text("_shell.saved").into(),
+             Ok(()) => self.save_note.take().unwrap_or_else(|| crate::i18n::text("_shell.saved").into()),
+diff --git a/crates/ibis-office-shell/src/web.rs b/crates/ibis-office-shell/src/web.rs
+index 7e2fb6d..efdae9d 100644
+--- a/crates/ibis-office-shell/src/web.rs
++++ b/crates/ibis-office-shell/src/web.rs
+@@ -26,6 +26,19 @@ extern "C" {
+     /// resolves to `{ name, bytes }`, or to `null` when cancelled.
+     #[wasm_bindgen(catch, js_name = ibisOfficePickFile)]
+     fn pick_file_js() -> Result<js_sys::Promise, JsValue>;
++
++    /// Defined by the page: stores `bytes` as the file `name` (asking for
++    /// a new name when `save_as`) and resolves to the name it was stored
++    /// under, or to `null` when cancelled.
++    #[wasm_bindgen(catch, js_name = ibisOfficeSaveFile)]
++    fn save_file_js(name: &str, bytes: &[u8], save_as: bool) -> Result<js_sys::Promise, JsValue>;
++}
++
++/// Hand the page a saved file; the name it was stored under, or `None` if cancelled.
++pub(crate) async fn save_file(name: String, bytes: Vec<u8>, save_as: bool) -> Result<Option<String>, String> {
++    let promise = save_file_js(&name, &bytes, save_as).map_err(describe)?;
++    let value = wasm_bindgen_futures::JsFuture::from(promise).await.map_err(describe)?;
++    Ok(value.as_string())
+ }
+ 
+ #[wasm_bindgen]
+@@ -141,9 +154,20 @@ pub async fn load_downloaded_fonts() -> Vec<Vec<u8>> {
+ /// Opens this page in a new browser tab with `query` (`""` or `"?new=docx"`): the Web version has one editor in a page, so what the desktop
+ /// opens in another window (ファイル > 新規作成 of an open document, the logo) is another tab. Called inside the click that asks for it, so
+ /// the browser does not take it for a pop-up.
++///
++/// sealoffice: the page decides (`ibisOfficeOpenTab`): its library has one tab, so a new file is made in it and the logo shows
++/// the library. (Nor can its CSP run the `new Function` upstream opens the tab with.)
+ pub fn open_in_new_tab(query: &str) {
+-    let open = js_sys::Function::new_with_args("q", "window.open(location.origin + location.pathname + q, '_blank');");
+-    let _ = open.call1(&JsValue::NULL, &JsValue::from_str(query));
++    if let Err(err) = open_tab_js(query) {
++        log::error!("{}", describe(err));
++    }
++}
++
++#[wasm_bindgen]
++extern "C" {
++    /// Defined by the page: what would open in a new tab with `query`.
++    #[wasm_bindgen(catch, js_name = ibisOfficeOpenTab)]
++    fn open_tab_js(query: &str) -> Result<(), JsValue>;
+ }
+ 
+ /// The kind `?new=<ext>` of this page's address names (`docx`, `xlsx`, `pptx`), if it has one.
+diff --git a/crates/ibis-office-xlsx/src/event_hooks.rs b/crates/ibis-office-xlsx/src/event_hooks.rs
+index ad4934f..b9d6d0a 100644
+--- a/crates/ibis-office-xlsx/src/event_hooks.rs
++++ b/crates/ibis-office-xlsx/src/event_hooks.rs
+@@ -198,7 +198,6 @@ impl SlideEditor {
+     /// A workbook as text (.csv, and saved as .tsv: the sheet shown), as .ods (OpenDocument), as .xls (Excel 97-2003) and as a
+     /// template (.xltx, .xltm). The file's password encrypts only the template. A copy named .tsv, .tab or .txt is the workbook's
+     /// own package and a copy as .xls has no report of what was left out (as the shell did before the formats were cut apart).
+-    #[cfg(not(target_family = "wasm"))]
+     pub(crate) fn xlsx_bytes_for_path(&self, path: &std::path::Path, source: &ibis_pptx::Source, copy: bool) -> Option<Result<crate::shell::format::FileBytes, String>> {
+         use crate::shell::format::FileBytes;
+         let extension = path.extension()?;
+diff --git a/crates/ibis-office-xlsx/src/lib.rs b/crates/ibis-office-xlsx/src/lib.rs
+index 4da4ffd..fa6ae52 100644
+--- a/crates/ibis-office-xlsx/src/lib.rs
++++ b/crates/ibis-office-xlsx/src/lib.rs
+@@ -595,7 +595,6 @@ impl FormatEditor for Workbook {
+         editor.xlsx_pdf_job()
+     }
+ 
+-    #[cfg(not(target_family = "wasm"))]
+     fn bytes_for_path(editor: &SlideEditor, path: &std::path::Path, source: &ibis_pptx::Source, copy: bool) -> Option<Result<crate::shell::format::FileBytes, String>> {
+         editor.xlsx_bytes_for_path(path, source, copy)
+     }
