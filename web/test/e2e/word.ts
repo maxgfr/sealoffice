@@ -3,13 +3,15 @@
 // a new document gets one paragraph per case, each case presses its shortcut the way
 // a Mac user would (⌘ on a Mac, Ctrl elsewhere), and the saved word/document.xml is
 // checked. Bold and italic are also checked on screen: the bold sample line must
-// gain ink, the italic one must change. Run with `bun run test:e2e:word` after
+// gain ink, the italic one must change. Last, a vertical Japanese document is
+// imported and drawn without a CSP violation. Run with `bun run test:e2e:word` after
 // `scripts/build.sh`. SHOTS=<dir> saves screenshots; HEADED=1 shows the browser.
 import type { Page } from 'playwright';
-import { existsSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import {
-  Check, DIST, SHOTS, WORD, docxXml, downloadOriginal, editorShown, goHome, hasWebGpu, launch, readClipboard, serve, shot,
+  Check, DIST, SHOTS, WORD, docxXml, downloadOriginal, editorShown, goHome, hasWebGpu, launch, openCard, readClipboard, serve, shot,
   startUnprotected, typeInEditor, waitHome,
 } from './lib';
 
@@ -18,6 +20,25 @@ const MAC = process.platform === 'darwin';
 const WORD_MOD = MAC ? 'Alt' : 'Control';
 const M = 'ControlOrMeta';
 const SAMPLE = 'Rendering sample: the quick brown fox jumps over the lazy dog';
+const VERTICAL = 'Vertical.docx';
+
+/** A .docx of one line of Japanese in a vertical (tbRl) section, zipped in a temporary directory; its path. */
+function verticalDocx(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'sealoffice-vertical-'));
+  const parts: Record<string, string> = {
+    '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+    '_rels/.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+    'word/document.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:rPr><w:sz w:val="48"/></w:rPr><w:t>「縦書き」、テスト。ー</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:textDirection w:val="tbRl"/></w:sectPr></w:body></w:document>',
+  };
+  for (const [name, xml] of Object.entries(parts)) {
+    mkdirSync(join(dir, 'src', dirname(name)), { recursive: true });
+    writeFileSync(join(dir, 'src', name), xml);
+  }
+  const out = join(dir, VERTICAL);
+  const zip = Bun.spawnSync(['zip', '-q', '-X', '-r', out, '.'], { cwd: join(dir, 'src') });
+  if (zip.exitCode !== 0) throw new Error(`zip failed: ${zip.stderr.toString()}`);
+  return out;
+}
 
 interface Para {
   xml: string;
@@ -235,13 +256,30 @@ async function main(): Promise<number> {
   const origin = `http://localhost:${server.port}`;
   const check = new Check();
   const pageErrors: string[] = [];
+  const policyErrors: string[] = [];
   const browser = await launch();
   try {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, acceptDownloads: true });
     await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin });
+    await context.addInitScript(() => {
+      // Counts the SVG images vertical glyphs are set in (`browser_raster::vertical_glyph`).
+      const src = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+      Object.defineProperty(HTMLImageElement.prototype, 'src', {
+        ...src,
+        set(this: HTMLImageElement, value: string) {
+          const w = window as unknown as { verticalGlyphs?: number };
+          if (value.startsWith('data:image/svg+xml') && value.includes('vertical-rl')) w.verticalGlyphs = (w.verticalGlyphs ?? 0) + 1;
+          src?.set?.call(this, value);
+        },
+      });
+      document.addEventListener('securitypolicyviolation', (e) => {
+        console.error(`securitypolicyviolation ${e.violatedDirective} ${e.blockedURI} at ${e.sourceFile}:${e.lineNumber}:${e.columnNumber} ${e.sample}`);
+      });
+    });
     const page = await context.newPage();
     page.on('pageerror', (e) => pageErrors.push(e.message));
     page.on('console', (m) => {
+      if (/Content Security Policy|Trusted ?Type|securitypolicyviolation/i.test(m.text())) policyErrors.push(m.text());
       if (m.type() === 'error') console.log(`  console.error: ${m.text().slice(0, 200)}`);
     });
     await page.goto(`${origin}/`);
@@ -320,6 +358,27 @@ async function main(): Promise<number> {
       check.ok(ok, what);
     }
     check.ok(every(doc.get('Rendering'), BOLD) && every(doc.get('Rendering'), ITALIC), `the sample line is saved bold and italic (${describe(doc.get('Rendering'))})`);
+
+    // Vertical Japanese: the browser sets each glyph in an SVG image (`browser_raster::vertical_glyph`),
+    // JavaScript the editor used to build with `new Function`, which the CSP refuses.
+    const importing = page.waitForEvent('filechooser');
+    await page.locator('.home-bar').getByRole('button', { name: 'Import', exact: true }).click();
+    await (await importing).setFiles(verticalDocx());
+    await openCard(page, VERTICAL);
+    await page.waitForTimeout(2000);
+    await shot(page, 'word-03-vertical');
+    const glyphs = await page.evaluate(() => (window as unknown as { verticalGlyphs?: number }).verticalGlyphs ?? 0);
+    check.ok(glyphs > 0, `vertical Japanese is set by the browser (${glyphs} glyph image(s))`);
+    check.ok(policyErrors.length === 0, `no CSP / Trusted Types violations (${policyErrors.length}: ${policyErrors.slice(0, 5).join(' | ')})`);
+    // Outside page.evaluate's own call, which DevTools lets evaluate strings.
+    const evalRefused = await page.evaluate(() => new Promise<boolean>((done) => setTimeout(() => {
+      try {
+        done(new Function('return false')() as boolean);
+      } catch {
+        done(true);
+      }
+    })));
+    check.ok(evalRefused, 'the page refuses new Function (so the check above means something)');
     check.ok(pageErrors.length === 0, `no uncaught errors (${pageErrors.join('; ')})`);
   } finally {
     await browser.close();
